@@ -324,11 +324,12 @@ def _chercher_manquantes(
         # utilise tels quels, sinon on demande au LLM de les deduire du nom.
         impose = plan["par_police"].get(nom) or {}
         termes = [t for t in impose.get("chercher", []) if isinstance(t, str)]
+        raison_consignes = ""
         if termes:
-            raison = impose.get("raison", "")
+            raison_consignes = impose.get("raison", "")
             print(f"    {nom:24} termes (consignes) : {', '.join(termes)}")
-            if raison:
-                print(f"      {'':24} {raison[:90]}")
+            if raison_consignes:
+                print(f"      {'':24} {raison_consignes[:90]}")
         else:
             termes = dl._mots_cles(nom, famille, contexte)
             print(f"    {nom:24} termes : {', '.join(termes) or '(aucun)'}")
@@ -347,11 +348,23 @@ def _chercher_manquantes(
             found[nom]["piste"] = str(res.archive) if res.archive else ""
             found[nom]["propose"] = fichier.name if fichier else ""
             found[nom]["origine"] = "auto"
+            # on garde trace du POURQUOI : consignes si l'utilisateur en a
+            # donne, sinon le detail de la recherche (source, type, terme)
+            if raison_consignes:
+                found[nom]["raison"] = raison_consignes
+            else:
+                found[nom]["raison"] = (
+                    f"{res.type_trouve} sur {res.candidat.source}"
+                    f" via '{res.terme}'"
+                    if res.candidat
+                    else res.type_trouve
+                )
             archive = res.archive.name if res.archive else "(archive inconnue)"
             print(f"      {'':24} -> {archive} [{res.type_trouve}] ({len(res.fichiers)} fichiers)")
             if fichier:
                 print(f"      {'':24}    proposerait : {fichier.name}")
         else:
+            found[nom]["raison"] = f"rien trouve ({res.erreur})"
             print(f"      {'':24} -> rien trouve ({res.erreur})")
 
     if trouvees:
@@ -468,6 +481,7 @@ def step_fonts(
                 "remplacement": e["fichier"],
                 "origine": origine,
                 "propose": e.get("propose", ""),
+                "raison": e.get("raison", ""),
                 "famille": r.get("famille") or e["famille"],
                 "pdfs": _resumer_pdfs(e["pdfs"]),
             }
@@ -486,6 +500,7 @@ def step_fonts(
                 "remplacement": e["fichier"],
                 "origine": e["origine"],
                 "propose": e.get("propose", ""),
+                "raison": e.get("raison", ""),
                 "famille": e["famille"],
                 "pdfs": _resumer_pdfs(e["pdfs"]),
             }
@@ -493,7 +508,15 @@ def step_fonts(
 
     write_csv(
         csv_path,
-        ["police_origine", "remplacement", "origine", "propose", "famille", "pdfs"],
+        [
+            "police_origine",
+            "remplacement",
+            "origine",
+            "propose",
+            "raison",
+            "famille",
+            "pdfs",
+        ],
         rows,
     )
     n_auto = sum(1 for r in rows if r["origine"] == "auto")
