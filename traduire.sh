@@ -4,6 +4,9 @@
 set -euo pipefail
 
 ROOT="$(cygpath -m "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")"
+# Le dossier de travail est HORS du depot (../Work), pour ne pas melanger
+# le programme et les donnees. Surchargeable par PDF2ZH_WORK.
+WORK="${PDF2ZH_WORK:-$(cygpath -m "$(cd "$ROOT/.." && pwd)")/Work}"
 V2="$ROOT/pdf2zh/kernel/PDFMathTranslate-next.git/.venv/Scripts/pdf2zh_next.exe"
 
 MODEL="${PDF2ZH_MODEL:-inclusionai/ling-3.0-flash-sante:free}"
@@ -16,7 +19,7 @@ LANG_IN="${PDF2ZH_LANG_IN:-en}"
 LANG_OUT="${PDF2ZH_LANG_OUT:-fr}"
 QPS="${PDF2ZH_QPS:-5}"
 TERM_QPS="${PDF2ZH_TERM_QPS:-5}"
-GLOSSARY="${PDF2ZH_GLOSSARY:-$ROOT/Travail/analyse/glossaire.csv}"
+GLOSSARY="${PDF2ZH_GLOSSARY:-$WORK/analyse/glossaire.csv}"
 
 curl -sf "$PROXY/models" -H "Authorization: Bearer hermes" >/dev/null \
   || { echo "ERREUR: proxy Hermes injoignable sur $PROXY"; echo "Lance: hermes proxy start --provider nous --port 8645"; exit 1; }
@@ -24,7 +27,7 @@ curl -sf "$PROXY/models" -H "Authorization: Bearer hermes" >/dev/null \
 FILES=("$@")
 if [ ${#FILES[@]} -eq 0 ]; then
   shopt -s nullglob
-  FILES=("$ROOT/PDFs Originaux"/*.pdf)
+  FILES=("$WORK/source"/*.pdf)
 fi
 
 for f in "${FILES[@]}"; do
@@ -43,7 +46,7 @@ for f in "${FILES[@]}"; do
     --glossaries "$GLOSSARY" \
     --watermark-output-mode no_watermark \
     --auto-enable-ocr-workaround \
-    --output "$ROOT/PDFs Traduits" \
+    --output "$WORK/traduits" \
     --qps "$QPS" \
     --min-text-length 2
 done

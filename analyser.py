@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Passe d'analyse d'un lot de PDFs : contexte, glossaire, polices.
 
-Produit dans Travail/analyse/ :
+Produit dans ../Work/analyse/ :
   contexte.md    description globale du lot + une section par page
   glossaire.csv  source,target,tgt_lng,source_pdf   (format babeldoc + origine)
   polices.csv    police_origine,famille,fichier_remplacement,source_pdf
@@ -11,7 +11,7 @@ Relancer le script ne detruit RIEN : les entrees deja presentes (donc deja
 corrigees a la main) sont conservees, seules les nouveautes sont ajoutees.
 
 Usage:
-  .venv/Scripts/python.exe analyser.py                     # PDFs Originaux/
+  .venv/Scripts/python.exe analyser.py                     # ../Work/source/
   .venv/Scripts/python.exe analyser.py "chemin/source" -o "chemin/travail"
 """
 from __future__ import annotations
@@ -413,15 +413,18 @@ def write_csv(path: Path, fields: list[str], rows: list[dict]) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Passe d'analyse d'un lot de PDFs")
-    ap.add_argument("source", nargs="?", default="PDFs Originaux", help="dossier des PDFs")
-    ap.add_argument("-o", "--output", default="Travail/analyse", help="dossier de travail")
+    ap.add_argument("source", nargs="?", default=None, help="dossier des PDFs (defaut: ../Work/source)")
+    ap.add_argument("-o", "--output", default=None, help="dossier de travail (defaut: ../Work/analyse)")
     ap.add_argument("-lo", "--lang-out", default="fr")
     ap.add_argument("--skip-context", action="store_true")
     ap.add_argument("--skip-glossary", action="store_true")
     ap.add_argument("--skip-fonts", action="store_true")
     a = ap.parse_args()
 
-    src, work = Path(a.source), Path(a.output)
+    # defauts relatifs au depot : le dossier de travail est ../Work (hors depot)
+    repo = Path(__file__).resolve().parent
+    src = Path(a.source) if a.source else repo.parent / "Work" / "source"
+    work = Path(a.output) if a.output else repo.parent / "Work" / "analyse"
     pdfs = sorted(src.glob("*.pdf"))
     if not pdfs:
         print(f"aucun PDF dans {src}", file=sys.stderr)

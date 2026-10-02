@@ -180,8 +180,9 @@ uv.lock
 *.docx
 
 # --- Travail local (projet Traduction AI V2) ---
-# Tests jetables, logs de benchmark, runs de parallelisme
-Travail/parallel/
-Travail/compare/
-# Sorties de traduction
+# Le dossier de travail vit HORS du depot (../Work) : rien a ignorer ici.
+# Garde-fous si un dossier de travail est recree par erreur dans le depot :
+Travail/
+Work/
+PDFs Originaux/
 PDFs Traduits/
