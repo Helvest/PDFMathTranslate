@@ -555,19 +555,39 @@ def write_csv(path: Path, fields: list[str], rows: list[dict]) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Passe d'analyse d'un lot de PDFs")
+    ap = argparse.ArgumentParser(
+        description="Passe d'analyse d'un lot de PDFs",
+        epilog=(
+            "Les etapes sont independantes : on peut lancer le contexte sans les "
+            "polices, ou les polices sans le contexte. Par defaut les trois."
+        ),
+    )
     ap.add_argument("source", nargs="?", default=None, help="dossier des PDFs (defaut: ../Work/source)")
     ap.add_argument("-o", "--output", default=None, help="dossier de travail (defaut: ../Work/analyse)")
     ap.add_argument("-lo", "--lang-out", default="fr")
-    ap.add_argument("--skip-context", action="store_true")
-    ap.add_argument("--skip-glossary", action="store_true")
-    ap.add_argument("--skip-fonts", action="store_true")
+
+    # --- selection des etapes (independantes) ------------------------------
     ap.add_argument(
-        "--no-download",
-        action="store_true",
-        help="ne pas chercher les polices manquantes sur dafontfree.io",
+        "--etapes",
+        default="contexte,polices,glossaire",
+        help=(
+            "etapes a executer, separees par des virgules. "
+            "Valeurs : contexte, polices, glossaire. "
+            "Ex: --etapes polices   (polices seules)"
+        ),
     )
+    ap.add_argument("--no-download", action="store_true", help="ne pas chercher les polices sur le web")
     a = ap.parse_args()
+
+    etapes = {e.strip().lower() for e in a.etapes.split(",") if e.strip()}
+    inconnues = etapes - {"contexte", "polices", "glossaire"}
+    if inconnues:
+        print(f"etapes inconnues : {', '.join(sorted(inconnues))}", file=sys.stderr)
+        print("valeurs valides : contexte, polices, glossaire", file=sys.stderr)
+        return 2
+    if not etapes:
+        print("aucune etape demandee", file=sys.stderr)
+        return 2
 
     # defauts relatifs au depot : le dossier de travail est ../Work (hors depot)
     repo = Path(__file__).resolve().parent
@@ -578,26 +598,35 @@ def main() -> int:
         print(f"aucun PDF dans {src}", file=sys.stderr)
         return 1
 
-    # proxy obligatoire
-    try:
-        urllib.request.urlopen(PROXY + "/models", timeout=10)
-    except Exception:
-        print(f"proxy Hermes injoignable sur {PROXY}", file=sys.stderr)
-        print("lance: hermes proxy start --provider nous --port 8645", file=sys.stderr)
-        return 1
+    # le proxy n'est requis que pour les etapes qui appellent le LLM
+    besoin_llm = bool(etapes & {"contexte", "glossaire"}) or (
+        "polices" in etapes and not a.no_download
+    )
+    if besoin_llm:
+        try:
+            urllib.request.urlopen(PROXY + "/models", timeout=10)
+        except Exception:
+            print(f"proxy Hermes injoignable sur {PROXY}", file=sys.stderr)
+            print("lance: hermes proxy start --provider nous --port 8645", file=sys.stderr)
+            return 1
 
     work.mkdir(parents=True, exist_ok=True)
     font_dir = work / "polices"
     font_dir.mkdir(exist_ok=True)
     print(f"lot: {len(pdfs)} PDF(s) -> {work}")
+    print(f"etapes : {', '.join(sorted(etapes))}")
 
-    # ORDRE : contexte d'abord (il nourrit la recherche de polices et le
-    # glossaire), puis polices, puis glossaire.
-    if not a.skip_context:
+    # Le contexte nourrit la recherche de polices : on le calcule d'abord si
+    # les deux etapes sont demandees. Sinon on relit le fichier existant.
+    ctx = ""
+    if "contexte" in etapes:
         ctx = step_context(pdfs, work, work / "contexte.md")
-    else:
-        ctx = ""
-    if not a.skip_fonts:
+    elif "polices" in etapes:
+        ctx_path = work / "contexte.md"
+        if ctx_path.exists():
+            ctx = ctx_path.read_text(encoding="utf-8")
+
+    if "polices" in etapes:
         step_fonts(
             pdfs,
             work,
@@ -606,7 +635,7 @@ def main() -> int:
             auto_download=not a.no_download,
             contexte=ctx,
         )
-    if not a.skip_glossary:
+    if "glossaire" in etapes:
         step_glossary(pdfs, work, work / "glossaire.csv", ctx, a.lang_out)
 
     print("\nTermine. A verifier/corriger :")
