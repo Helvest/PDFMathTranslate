@@ -683,6 +683,10 @@ def step_context(pdfs: list[Path], work: Path, ctx_path: Path) -> str:
 
 GLOSS_PROMPT = """Tu extrais les termes a traduire de facon consistante vers le {lang_out}.
 
+=== CONSIGNES DE L'UTILISATEUR ===
+{consignes}
+=== FIN DES CONSIGNES ===
+
 Contexte du document :
 {global_ctx}
 
@@ -710,6 +714,9 @@ Regles :
   En cas de doute, TRADUIS.
 - Ignore les fragments coupes, les numeros de page, les dates isolees,
   et tout terme entre chevrons comme <Rien>.
+- Les consignes de l'utilisateur PRIMENT : s'il a donne une traduction imposee
+  pour un terme, reprends-la EXACTEMENT. S'il a dit qu'un terme ne se traduit
+  jamais, mets la meme valeur en src et tgt.
 
 Reponds UNIQUEMENT par un tableau JSON, sans commentaire :
 [{{"src": "terme", "tgt": "traduction"}}]
@@ -721,6 +728,13 @@ def step_glossary(
 ) -> None:
     """Passe 2 : extraction du glossaire, page par page, avec le contexte."""
     print("\n[3/3] Glossaire (passe 2, LLM)")
+
+    # les consignes de l'utilisateur s'appliquent aussi ici : s'il a impose une
+    # traduction, le glossaire doit la reprendre a l'identique.
+    consignes = _lire_consignes(work / "consignes-contexte.md")
+    if consignes:
+        print("  consignes-contexte.md lu")
+
     existing: dict[str, str] = {}
     if gloss_path.exists():
         with gloss_path.open(encoding="utf-8-sig", newline="") as f:
@@ -742,6 +756,7 @@ def step_glossary(
                 known = ", ".join(sorted(found)[:60]) or "(aucun)"
                 raw = llm(
                     GLOSS_PROMPT.format(
+                        consignes=consignes[:6000] or "(aucune consigne fournie)",
                         lang_out=lang_out,
                         global_ctx=global_ctx or "(aucun)",
                         page_ctx=page_ctx + (f" (partie {part})" if part > 1 else ""),
