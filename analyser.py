@@ -160,6 +160,19 @@ def chunks(text: str) -> list[str]:
 # ---------------------------------------------------------------- etapes
 
 
+def _fichier_present(fichier: str, font_dir: Path) -> bool:
+    """Le fichier_remplacement pointe-t-il sur un fichier reel ?
+
+    Accepte un nom nu (relatif a font_dir), un chemin relatif au depot, ou un
+    chemin absolu. Sans extension, essaie .ttf puis .otf.
+    """
+    p = Path(fichier)
+    candidats = [p] if p.is_absolute() else [font_dir / p, Path(__file__).resolve().parent / p]
+    if p.suffix.lower() not in (".ttf", ".otf"):
+        candidats += [c.with_suffix(e) for c in list(candidats) for e in (".ttf", ".otf")]
+    return any(c.is_file() for c in candidats)
+
+
 def step_fonts(pdfs: list[Path], work: Path, csv_path: Path, font_dir: Path) -> None:
     """Polices : aucun LLM, instantane."""
     print("\n[1/3] Polices (sans LLM)")
@@ -187,8 +200,17 @@ def step_fonts(pdfs: list[Path], work: Path, csv_path: Path, font_dir: Path) -> 
         elif (font_dir / f"{name}.ttf").exists():
             e["fichier"] = f"{name}.ttf"
             prefilled += 1
+        elif (font_dir / f"{name}.otf").exists():
+            e["fichier"] = f"{name}.otf"
+            prefilled += 1
         else:
             e["fichier"] = existing.get(name, {}).get("fichier_remplacement", "")
+
+        # Un fichier_remplacement qui ne pointe plus sur rien est efface :
+        # sinon le CSV annonce une police absente et polices.py la signale
+        # comme introuvable a chaque run.
+        if e["fichier"] and not _fichier_present(e["fichier"], font_dir):
+            e["fichier"] = ""
     if prefilled:
         print(f"  {prefilled} pre-remplies depuis polices/")
 
