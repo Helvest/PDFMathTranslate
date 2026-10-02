@@ -968,7 +968,7 @@ async function vuePolices(v) {
   const babeldoc = pol.babeldoc || [];
   const installees = new Set(duProjet.map((x) => x.nom));
 
-  lignes = appliquerTri(lignes, "polices", ["spans", "pages"]);
+  lignes = appliquerTri(lignes, "polices", ["spans", "pages", "nb_pdfs"]);
 
   // La liste deroulante : les trois provenances, groupees par <optgroup>.
   const groupes = [
@@ -1005,11 +1005,12 @@ async function vuePolices(v) {
         ${entete("polices", "origine", "Origine")}
         ${entete("polices", "propose", "Propose")}
         ${entete("polices", "famille", "Famille")}
-        ${entete("polices", "spans", "Usage")}
-        ${entete("polices", "pdfs", "PDFs")}
+        ${entete("polices", "spans", "Mots")}
+        ${entete("polices", "pages", "Pages")}
+        ${entete("polices", "nb_pdfs", "PDFs")}
+        ${entete("polices", "pdfs", "Details")}
       </tr>`;
     for (const l of lignes) {
-      const usage = Number(l.spans) ? `${l.spans}× / ${l.pages || 1}p` : "—";
       const dansProjet = [...installees].some((i) => memePolice(i, l.remplacement));
       html += `<tr>
         <td>${echapper(l.police_origine)}</td>
@@ -1023,8 +1024,10 @@ async function vuePolices(v) {
         <td><span class="tag ${echapper(l.origine || "defaut")}">${echapper(l.origine || "defaut")}</span></td>
         <td class="faible">${echapper(l.propose || "—")}</td>
         <td class="faible">${echapper(l.famille || "")}</td>
-        <td>${usage}</td>
-        <td class="faible">${echapper(l.pdfs || "")}</td>
+        <td>${echapper(l.spans || "—")}</td>
+        <td>${echapper(l.pages || "—")}</td>
+        <td>${echapper(l.nb_pdfs || "—")}</td>
+        <td class="faible" style="font-size:11px">${echapper(l.pdfs || "")}</td>
       </tr>`;
     }
     html += `</table></div><div style="margin-top:8px"><button class="btn acc" id="sv-polices">
@@ -1076,7 +1079,7 @@ async function vuePolices(v) {
     const maj = {};
     v.querySelectorAll("[data-pol]").forEach((s) => (maj[s.dataset.pol] = s.value));
     const enteteCsv = ["police_origine", "remplacement", "origine", "propose",
-                       "raison", "famille", "spans", "pages", "pdfs"];
+                       "raison", "famille", "spans", "pages", "nb_pdfs", "pdfs"];
     const out = [enteteCsv.join(",")];
     for (const l of lignes) {
       const r = { ...l, remplacement: maj[l.police_origine] ?? "" };

@@ -561,6 +561,7 @@ def step_fonts(
                 "famille": r.get("famille") or e["famille"],
                 "spans": e.get("spans", 0),
                 "pages": len(e.get("pages", set())),
+                "nb_pdfs": len(e["pdfs"]),
                 "pdfs": _resumer_pdfs(e["pdfs"]),
             }
         )
@@ -582,6 +583,7 @@ def step_fonts(
                 "famille": e["famille"],
                 "spans": e.get("spans", 0),
                 "pages": len(e.get("pages", set())),
+                "nb_pdfs": len(e["pdfs"]),
                 "pdfs": _resumer_pdfs(e["pdfs"]),
             }
         )
@@ -597,6 +599,7 @@ def step_fonts(
             "famille",
             "spans",
             "pages",
+            "nb_pdfs",
             "pdfs",
         ],
         rows,
