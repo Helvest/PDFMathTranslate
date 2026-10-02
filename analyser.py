@@ -733,8 +733,14 @@ def step_context(pdfs: list[Path], work: Path, ctx_dir: Path) -> list[dict]:
         print(f"    -> {cible.name} ({len(pages_resume)} pages)")
         ctxs.append(ctx)
 
+    # meme convention que les fichiers de PDF : sans le prefixe "- "
     lot_path.write_text(
-        json.dumps({"points": lot_lines}, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(
+            {"points": [l[2:] if l.startswith("- ") else l for l in lot_lines]},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     print(f"  -> _lot.json : {len(lot_lines)} points")
