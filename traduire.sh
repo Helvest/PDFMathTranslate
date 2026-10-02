@@ -36,8 +36,10 @@ QPS="${PDF2ZH_QPS:-5}"
 TERM_QPS="${PDF2ZH_TERM_QPS:-5}"
 GLOSSARY="${PDF2ZH_GLOSSARY:-$WORK/analyse/glossaire.csv}"
 
-curl -sf "$PROXY/models" -H "Authorization: Bearer hermes" >/dev/null \
-  || { echo "ERREUR: proxy Hermes injoignable sur $PROXY"; echo "Lance: hermes proxy start --provider nous --port 8645"; exit 1; }
+if ! curl -sf "$PROXY/models" -H "Authorization: Bearer hermes" >/dev/null; then
+  echo "AVERTISSEMENT: proxy Hermes injoignable sur $PROXY" >&2
+  echo "  la traduction va echouer. Lance: hermes proxy start --provider nous --port 8645" >&2
+fi
 
 FILES=("$@")
 if [ ${#FILES[@]} -eq 0 ]; then

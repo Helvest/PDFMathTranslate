@@ -234,7 +234,7 @@
 <div class="haut">
   <div class="marque">Traduction PDF<small id="projet-titre"></small></div>
   <div class="etapes" id="etapes"></div>
-  <span class="pilule" id="pilule-proxy">proxy ?</span>
+  <span class="pilule" id="pilule-proxy" title="etat du proxy Hermes">◌</span>
 </div>
 
 <!-- ============ corps ============ -->
@@ -858,13 +858,28 @@ $("#nom-projet").addEventListener("keydown", (e) => {
 });
 
 async function init() {
+  await majProxy();
+  setInterval(majProxy, 10000);   // reverifie regulierement
+  await chargerProjets();
+}
+
+async function majProxy() {
+  const p = $("#pilule-proxy");
+  if (!p) return;
   try {
     const e = await api("/etat");
-    const p = $("#pilule-proxy");
-    p.textContent = e.proxy ? "proxy actif" : "proxy inactif";
+    // icone seule : verte si joignable, rouge sinon. Purement informatif,
+    // aucune etape n'est bloquee par l'absence de proxy.
+    p.textContent = e.proxy ? "●" : "○";
     p.className = "pilule " + (e.proxy ? "ok" : "ko");
-  } catch (err) { /* ignore */ }
-  await chargerProjets();
+    p.title = e.proxy
+      ? "proxy Hermes joignable"
+      : "proxy Hermes injoignable — les etapes qui utilisent le LLM echoueront";
+  } catch (err) {
+    p.textContent = "○";
+    p.className = "pilule ko";
+    p.title = "serveur injoignable";
+  }
 }
 
 init();

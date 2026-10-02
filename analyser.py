@@ -1000,7 +1000,10 @@ def main() -> int:
         print("depose tes PDFs dans source/ puis relance", file=sys.stderr)
         return 1
 
-    # le proxy n'est requis que pour les etapes qui appellent le LLM
+    # Le proxy est necessaire pour les etapes qui appellent le LLM, mais on ne
+    # BLOQUE jamais : on avertit et on laisse tourner. Une etape sans LLM doit
+    # pouvoir s'executer, et l'utilisateur doit voir l'echec reel plutot qu'un
+    # refus preventif.
     besoin_llm = bool(etapes & {"contexte", "glossaire"}) or (
         "polices" in etapes and not a.no_download
     )
@@ -1008,9 +1011,12 @@ def main() -> int:
         try:
             urllib.request.urlopen(PROXY + "/models", timeout=10)
         except Exception:
-            print(f"proxy Hermes injoignable sur {PROXY}", file=sys.stderr)
-            print("lance: hermes proxy start --provider nous --port 8645", file=sys.stderr)
-            return 1
+            print(f"AVERTISSEMENT: proxy Hermes injoignable sur {PROXY}", file=sys.stderr)
+            print(
+                "  les etapes utilisant le LLM vont echouer. "
+                "Lance: hermes proxy start --provider nous --port 8645",
+                file=sys.stderr,
+            )
 
     work.mkdir(parents=True, exist_ok=True)
     font_dir = work / "polices"
