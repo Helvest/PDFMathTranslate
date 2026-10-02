@@ -4,9 +4,19 @@
 set -euo pipefail
 
 ROOT="$(cygpath -m "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")"
-# Le dossier de travail est HORS du depot (../Work), pour ne pas melanger
-# le programme et les donnees. Surchargeable par PDF2ZH_WORK.
-WORK="${PDF2ZH_WORK:-$(cygpath -m "$(cd "$ROOT/.." && pwd)")/Work}"
+# Les donnees vivent HORS du depot, un dossier par projet :
+#   ../Projets/<nom>/{source,traduits,downloads,analyse}
+# Le projet se choisit par PDF2ZH_PROJET, sinon le premier trouve.
+PROJETS="$(cygpath -m "$(cd "$ROOT/.." && pwd)")/Projets"
+if [ -n "${PDF2ZH_WORK:-}" ]; then
+  WORK="$PDF2ZH_WORK"                      # surcharge explicite (compatibilite)
+elif [ -n "${PDF2ZH_PROJET:-}" ]; then
+  WORK="$PROJETS/$PDF2ZH_PROJET"
+else
+  WORK="$(ls -d "$PROJETS"/*/ 2>/dev/null | head -1)"
+  WORK="${WORK%/}"
+fi
+[ -d "$WORK" ] || { echo "ERREUR: projet introuvable ($WORK)"; echo "Projets disponibles :"; ls "$PROJETS" 2>/dev/null; exit 1; }
 V2="$ROOT/pdf2zh/kernel/PDFMathTranslate-next.git/.venv/Scripts/pdf2zh_next.exe"
 
 # Polices custom : sitecustomize.py est importe automatiquement par Python si

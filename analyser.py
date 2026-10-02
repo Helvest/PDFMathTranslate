@@ -820,6 +820,92 @@ def write_csv(path: Path, fields: list[str], rows: list[dict]) -> None:
         w.writerows(rows)
 
 
+MODELE_CONSIGNES_CONTEXTE = """# Consignes pour le contexte
+
+Ce fichier est a toi. Ecris-le en francais, en langage naturel : un LLM le lit
+avant d'analyser les documents, et s'en sert pour ecrire un contexte juste.
+
+Il ne concerne QUE le contexte (pas la recherche des polices).
+
+## Explique ce que tu sais deja
+
+Tout ce que tu sais et que le LLM ne peut pas deviner en lisant les PDFs.
+
+```
+Cloud Empress est un jeu de role de science-fantasy post-apocalyptique.
+Le ton est sombre mais pas desespere, avec une pointe d'absurde.
+```
+
+## Donne des liens vers des sources utiles
+
+Wikipedia, site officiel, page de licence, wiki de fans.
+
+```
+Sources :
+- https://cloudempress.com/
+- https://en.wikipedia.org/wiki/Cloud_Empress
+```
+
+## Preciser la terminologie
+
+```
+- "Farmerling" se traduit par "Farmerling" (on garde le mot anglais).
+- "Lowland Wastes" se traduit par "Terres Basses".
+- "Cloud Empress" ne se traduit jamais.
+```
+
+## Notes libres
+
+_(tout ce qui peut aider a comprendre les documents)_
+"""
+
+MODELE_CONSIGNES_POLICES = """# Consignes pour les polices
+
+Ce fichier est a toi. Ecris-le en francais, en langage naturel : un LLM le lit
+avant de lancer la recherche automatique, et s'en sert pour mieux choisir.
+
+Il ne concerne QUE les polices (pas le contexte des documents).
+
+## Sites a utiliser en priorite
+
+```
+Sites prioritaires :
+- https://fonts.google.com/
+- https://www.freefonts.io/
+```
+
+## Imposer une police pour un usage precis
+
+```
+- Les textes normaux doivent etre en Helvetica.
+- Les titres doivent etre en Futura.
+```
+
+## Ecarter une police
+
+```
+- Ne pas utiliser Comic Sans, jamais.
+```
+
+## Notes libres
+
+_(tout ce qui peut aider : contraintes, preferences, remarques)_
+"""
+
+
+def _creer_consignes(analyse_dir: Path) -> None:
+    """Cree les fichiers de consignes s'ils manquent. N'ecrase jamais."""
+    analyse_dir.mkdir(parents=True, exist_ok=True)
+    for nom, modele in (
+        ("consignes-contexte.md", MODELE_CONSIGNES_CONTEXTE),
+        ("consignes-polices.md", MODELE_CONSIGNES_POLICES),
+    ):
+        cible = analyse_dir / nom
+        if not cible.exists():
+            cible.write_text(modele, encoding="utf-8")
+            print(f"  cree : {nom}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Passe d'analyse d'un lot de PDFs",
@@ -828,8 +914,10 @@ def main() -> int:
             "polices, ou les polices sans le contexte. Par defaut les trois."
         ),
     )
-    ap.add_argument("source", nargs="?", default=None, help="dossier des PDFs (defaut: ../Work/source)")
-    ap.add_argument("-o", "--output", default=None, help="dossier de travail (defaut: ../Work/analyse)")
+    ap.add_argument("source", nargs="?", default=None, help="dossier des PDFs (defaut: <projet>/source)")
+    ap.add_argument("-o", "--output", default=None, help="dossier de travail (defaut: <projet>/analyse)")
+    ap.add_argument("-p", "--projet", default=None, help="nom du projet (defaut: le premier trouve)")
+    ap.add_argument("--creer", action="store_true", help="creer la structure du projet si absente")
     ap.add_argument("-lo", "--lang-out", default="fr")
 
     # --- selection des etapes (independantes) ------------------------------
@@ -855,13 +943,41 @@ def main() -> int:
         print("aucune etape demandee", file=sys.stderr)
         return 2
 
-    # defauts relatifs au depot : le dossier de travail est ../Work (hors depot)
+    # Les donnees vivent HORS du depot, un dossier par projet :
+    #   ../Projets/<nom>/{source,traduits,downloads,analyse}
+    # Le projet se choisit par --projet, sinon le premier trouve.
     repo = Path(__file__).resolve().parent
-    src = Path(a.source) if a.source else repo.parent / "Work" / "source"
-    work = Path(a.output) if a.output else repo.parent / "Work" / "analyse"
+    projets_dir = repo.parent / "Projets"
+
+    if a.projet:
+        projet = projets_dir / a.projet
+        # avec --creer, un projet absent est cree ; sinon c'est une erreur
+        if not projet.is_dir() and not a.creer:
+            print(f"projet introuvable : {a.projet}", file=sys.stderr)
+            dispo = sorted(p.name for p in projets_dir.iterdir() if p.is_dir()) if projets_dir.is_dir() else []
+            print(f"disponibles : {', '.join(dispo) or '(aucun)'}", file=sys.stderr)
+            return 2
+    else:
+        trouves = sorted(p for p in projets_dir.iterdir() if p.is_dir()) if projets_dir.is_dir() else []
+        if not trouves:
+            print(f"aucun projet dans {projets_dir}", file=sys.stderr)
+            print("cree-en un :  --projet <nom> --creer", file=sys.stderr)
+            return 1
+        projet = trouves[0]
+
+    # creation a la volee : structure complete, rien d'ecrase
+    if a.creer:
+        for d in ("source", "traduits", "downloads", "analyse", "analyse/polices"):
+            (projet / d).mkdir(parents=True, exist_ok=True)
+        _creer_consignes(projet / "analyse")
+        print(f"projet pret : {projet}")
+
+    src = Path(a.source) if a.source else projet / "source"
+    work = Path(a.output) if a.output else projet / "analyse"
     pdfs = sorted(src.glob("*.pdf"))
     if not pdfs:
         print(f"aucun PDF dans {src}", file=sys.stderr)
+        print("depose tes PDFs dans source/ puis relance", file=sys.stderr)
         return 1
 
     # le proxy n'est requis que pour les etapes qui appellent le LLM
