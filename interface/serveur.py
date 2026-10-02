@@ -714,6 +714,101 @@ def api_pdf(nom: str, fichier: str, type: str = "source"):
     return FileResponse(str(f), media_type="application/pdf")
 
 
+@app.get("/api/projets/{nom}/etape/suivante")
+def api_etape_suivante(nom: str):
+    """Quelle etape lancer ensuite, et ce qui manque avant de la lancer.
+
+    Le workflow est concu pour une pause entre chaque etape : on valide a la
+    main entre les etapes, donc rien n'est enchaine automatiquement.
+    """
+    p = _projet(nom)
+    if not p.is_dir():
+        raise HTTPException(404, "projet introuvable")
+
+    # --- ou en est chaque etape ?
+    etats = _etat_projet(nom)
+
+    # --- l'ordre du workflow
+    ordre = [
+        ("contexte", "Contexte", lambda: (p / "analyse" / "contexte").is_dir()
+            and any(f.glob("*.json") for f in [p / "analyse" / "contexte"])),
+        ("polices", "Polices", lambda: (p / "analyse" / "polices.csv").is_file()),
+        ("glossaire", "Glossaire", lambda: (p / "analyse" / "glossaire.csv").is_file()),
+        ("traduire", "Traduire", lambda: any((p / "traduits").glob("*.pdf"))),
+    ]
+
+    # la premiere etape non faite
+    suivante = None
+    for cle, libelle, fait in ordre:
+        if not fait():
+            suivante = (cle, libelle)
+            break
+
+    # --- ce qui manque, et ce qui est deja fait
+    analyse = p / "analyse"
+    srcs = sorted(x.name for x in (p / "source").glob("*.pdf")) if (p / "source").is_dir() else []
+    o = _options(nom)
+
+    # glossaire : compte les termes et les pieges source == cible
+    n_termes = 0
+    n_pieges = 0
+    g = analyse / "glossaire.csv"
+    if g.is_file():
+        import csv as _csv
+
+        try:
+            with g.open(encoding="utf-8-sig", newline="") as f:
+                for l in _csv.DictReader(f):
+                    if not l.get("source"):
+                        continue
+                    n_termes += 1
+                    if (l["source"] or "").strip().lower() == (l.get("target") or "").strip().lower():
+                        n_pieges += 1
+        except (OSError, csv.Error):
+            pass
+
+    # polices : comptees et choisies
+    n_polices = n_choisies = 0
+    pc = analyse / "polices.csv"
+    if pc.is_file():
+        import csv as _csv
+
+        try:
+            with pc.open(encoding="utf-8-sig", newline="") as f:
+                for l in _csv.DictReader(f):
+                    if not l.get("police_origine"):
+                        continue
+                    n_polices += 1
+                    if (l.get("remplacement") or "").strip():
+                        n_choisies += 1
+        except (OSError, csv.Error):
+            pass
+
+    # contexte : un json par PDF
+    n_contextes = 0
+    ctx = analyse / "contexte"
+    if ctx.is_dir():
+        n_contextes = len([f for f in ctx.glob("*.json") if not f.name.startswith("_")])
+
+    return {
+        "suivante": suivante[0] if suivante else None,
+        "libelle": suivante[1] if suivante else "",
+        "etats": etats,
+        "etat_global": "termine" if not suivante else "en_cours",
+        "resume": {
+            "pdfs_source": len(srcs),
+            "pdfs_selectionnes": len(o.get("pdfs_analyser") or []),
+            "pdfs_traduire": len(o.get("pdfs_traduire") or []),
+            "traduits": len(list((p / "traduits").glob("*.pdf"))) if (p / "traduits").is_dir() else 0,
+            "contextes": n_contextes,
+            "polices": n_polices,
+            "polices_choisies": n_choisies,
+            "termes": n_termes,
+            "termes_pieges": n_pieges,
+        },
+    }
+
+
 @app.post("/api/projets/{nom}/etape/{etape}")
 def api_lancer_etape(nom: str, etape: str):
     if etape not in ETAPES and etape != "tout":

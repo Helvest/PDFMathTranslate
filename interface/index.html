@@ -295,6 +295,17 @@
 <div class="notif" id="notif"></div>
 
 <!-- modal creation -->
+<div class="modal-fond cache" id="modal-confirm">
+  <div class="modal" style="width:470px">
+    <h3 id="confirm-titre">Confirmer</h3>
+    <div id="confirm-contenu" class="faible" style="max-height:50vh;overflow:auto"></div>
+    <div class="rangee">
+      <button class="btn" id="confirm-non">Annuler</button>
+      <button class="btn acc" id="confirm-oui">Lancer</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-fond cache" id="modal">
   <div class="modal">
     <h3>Nouveau projet</h3>
@@ -314,6 +325,7 @@
 const S = {
   projets: [], actif: null, projet: null, options: null,
   vue: "config", etapes: {}, poll: null, replie: false,
+  suivant: null,          // recapitulatif de l'etape suivante
   tri: "ordre", filtrePdf: "", _logEtape: "contexte", _ctxCle: null,
   // tri par colonne : sens 1 = croissant, -1 = decroissant, 0 = inactif
   tris: { glossaire: {col: null, sens: 0}, polices: {col: null, sens: 0} },
@@ -464,11 +476,13 @@ async function chargerModeles() {
 async function chargerProjet(nom) {
   S.actif = nom;
   if (S.vue === "bench") S.vue = "config";
-  const [p, o] = await Promise.all([
+  const [p, o, s] = await Promise.all([
     api("/projets/" + encodeURIComponent(nom)),
     api("/projets/" + encodeURIComponent(nom) + "/options").catch(() => null),
+    api("/projets/" + encodeURIComponent(nom) + "/etape/suivante").catch(() => null),
   ]);
   S.projet = p; S.options = o; S.etapes = p.etapes || {};
+  S.suivant = s || { suivante: null, libelle: "", resume: {} };
   $("#projet-titre").textContent = nom ? "· " + nom : "";
   dessinerProjets(); dessinerEtapes(); dessinerVue(); demarrerPoll();
 }
@@ -496,10 +510,26 @@ function dessinerEtapes() {
       <span class="nom">${LIB[cle]}</span>
       <span class="det">${echapper(det)}</span></button>`;
   };
-  zone.innerHTML = ORDRE.map(bouton).join("") + bouton("tout");
+  // Pas de bouton "Tout" : le workflow demande une pause entre chaque etape,
+  // pour valider a la main. C'est "etape suivante" qui avance.
+  zone.innerHTML = ORDRE.map(bouton).join("") + boutonSuivant();
+
+  const bs = zone.querySelector("[data-suivant]");
+  if (bs) bs.addEventListener("click", () => lancerEtapeSuivante());
 
   zone.querySelectorAll("[data-etape]").forEach((b) =>
     b.addEventListener("click", () => lancerEtape(b.dataset.etape)));
+}
+
+// Le bouton "etape suivante" : dit ce qu'il va lancer, puis demande confirmation.
+function boutonSuivant() {
+  const v = S.suivant || {};
+  const nom = v.libelle || "Suivante";
+  return `<button class="etape tout" data-suivant
+    title="${echapper(v.suivante ? "Lancer l'etape : " + nom : "Toutes les etapes sont faites")}">
+    <span class="ic">${v.suivante ? "▶" : "✓"}</span>
+    <span class="nom">${echapper(v.suivante ? nom : "Termine")}</span>
+    <span class="det">suivante</span></button>`;
 }
 
 async function lancerEtape(etape) {
@@ -513,6 +543,96 @@ async function lancerEtape(etape) {
   } catch (e) {
     notif(e.message, true);
   }
+}
+
+// Avant de lancer l'etape suivante : rappeler ou en est le projet, et ce qui
+// manque. Le workflow repose sur une pause de validation entre chaque etape,
+// donc on ne lance jamais sans avoir montre l'etat.
+// Confirmation via la modale. Resout true si l'utilisateur accepte.
+// Remplace window.confirm, qui bloque le navigateur entier.
+function confirmer(titre, contenuHTML, libelleOk) {
+  return new Promise((resolve) => {
+    const fond = $("#modal-confirm");
+    $("#confirm-titre").textContent = titre;
+    $("#confirm-contenu").innerHTML = contenuHTML;
+    $("#confirm-oui").textContent = libelleOk || "Lancer";
+
+    const fini = (v) => {
+      fond.classList.add("cache");
+      $("#confirm-oui").removeEventListener("click", oui);
+      $("#confirm-non").removeEventListener("click", non);
+      document.removeEventListener("keydown", surTouche);
+      resolve(v);
+    };
+    const oui = () => fini(true);
+    const non = () => fini(false);
+    const surTouche = (e) => { if (e.key === "Escape") fini(false); };
+
+    $("#confirm-oui").addEventListener("click", oui);
+    $("#confirm-non").addEventListener("click", non);
+    document.addEventListener("keydown", surTouche);
+    fond.classList.remove("cache");
+  });
+}
+
+async function lancerEtapeSuivante() {
+  if (!S.actif) return;
+  let s = S.suivant;
+  try { s = await api(`/projets/${encodeURIComponent(S.actif)}/etape/suivante`); S.suivant = s; }
+  catch (e) { return notif(e.message, true); }
+
+  if (!s.suivante) return notif("Toutes les etapes sont faites");
+
+  const r = s.resume || {};
+  const a = [];
+
+  // ce qui est fait
+  if (r.contextes) a.push(`✓ contexte : ${r.contextes} document(s)`);
+  else a.push("• contexte : a faire");
+  if (r.polices) a.push(`✓ polices : ${r.polices_choisies}/${r.polices} choisie(s)`);
+  else a.push("• polices : a faire");
+  if (r.termes) {
+    a.push(`✓ glossaire : ${r.termes} terme(s)`
+      + (r.termes_pieges ? ` — dont ${r.termes_pieges} source = cible` : ""));
+  } else a.push("• glossaire : a faire");
+
+  // ce qui va etre traite
+  const sel = r.pdfs_selectionnes || 0;
+  const nb = sel || r.pdfs_source || 0;
+  let suite = `Va lancer : ${s.libelle} sur ${nb} PDF(s)`;
+  if (sel && sel < (r.pdfs_source || 0)) {
+    suite += ` (selection : ${sel} sur ${r.pdfs_source})`;
+  }
+
+  // ce qui manque
+  const manques = [];
+  if (!r.pdfs_source) manques.push("aucun PDF dans source/");
+  if (s.suivante === "traduire" && !r.termes) {
+    manques.push("glossaire vide : la traduction sera moins coherente");
+  }
+  if (s.suivante === "traduire" && r.polices && !r.polices_choisies) {
+    manques.push("aucune police de remplacement choisie");
+  }
+  if (r.termes_pieges) {
+    manques.push(`${r.termes_pieges} terme(s) source = cible : verifie que c'est voulu`);
+  }
+  if (s.suivante === "glossaire" && r.polices_choisies < r.polices) {
+    manques.push(`${r.polices - r.polices_choisies} police(s) sans remplacement`);
+  }
+
+  const html =
+    `<p style="margin:0 0 10px">${echapper(suite)}</p>`
+    + `<div>${a.map((l) =>
+        `<div class="faible" style="padding:2px 0">${echapper(l)}</div>`).join("")}</div>`
+    + (manques.length
+        ? `<h2 class="titre" style="margin:14px 0 6px">A verifier</h2>`
+          + manques.map((m) =>
+              `<div style="color:var(--attention);padding:2px 0">${echapper(m)}</div>`).join("")
+        : "");
+
+  const ok = await confirmer(`Lancer : ${s.libelle}`, html, `Lancer ${s.libelle}`);
+  if (!ok) return notif("Annule");
+  await lancerEtape(s.suivante);
 }
 
 function demarrerPoll() {
