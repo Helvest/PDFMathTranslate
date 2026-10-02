@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# rm sur : envoie a la CORBEILLE Windows au lieu de supprimer definitivement.
+# Usage :  ./bin/rm-sûr <fichier|dossier> [...]
+#
+# Pourquoi : un "rm -rf" ne passe pas par la corbeille, donc une erreur est
+# irreversible. Ce script utilise l'API Shell Windows (SHFileOperation) qui
+# deplace vers la corbeille -> restauration possible par l'utilisateur.
+set -euo pipefail
+
+if [ $# -eq 0 ]; then
+  echo "usage: $0 <fichier|dossier> [...]" >&2
+  exit 2
+fi
+
+# Convertit chaque chemin MSYS en chemin Windows natif, puis appelle
+# PowerShell qui fait le deplacement vers la corbeille.
+for target in "$@"; do
+  if [ ! -e "$target" ]; then
+    echo "  ignore (inexistant) : $target" >&2
+    continue
+  fi
+  win="$(cygpath -w "$(cd "$(dirname "$target")" && pwd)/$(basename "$target")")"
+  powershell -NoProfile -Command "
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
+      '$win', 'OnlyErrorDialogs', 'SendToRecycleBin')
+  " 2>&1 | grep -v "^$" || true
+  if [ -e "$target" ]; then
+    # c'etait peut-etre un dossier
+    powershell -NoProfile -Command "
+      Add-Type -AssemblyName Microsoft.VisualBasic
+      [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
+        '$win', 'OnlyErrorDialogs', 'SendToRecycleBin')
+    " 2>&1 | grep -v "^$" || true
+  fi
+  if [ -e "$target" ]; then
+    echo "  ECHEC : $target existe toujours" >&2
+    exit 1
+  fi
+  echo "  -> corbeille : $target"
+done

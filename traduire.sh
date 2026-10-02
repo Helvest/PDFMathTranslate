@@ -9,6 +9,11 @@ ROOT="$(cygpath -m "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")"
 WORK="${PDF2ZH_WORK:-$(cygpath -m "$(cd "$ROOT/.." && pwd)")/Work}"
 V2="$ROOT/pdf2zh/kernel/PDFMathTranslate-next.git/.venv/Scripts/pdf2zh_next.exe"
 
+# Polices custom : sitecustomize.py est importe automatiquement par Python si
+# son dossier est dans PYTHONPATH. Il charge Work/analyse/polices.csv et
+# patche le FontMapper de BabelDOC. PDF2ZH_NO_FONTS=1 pour desactiver.
+export PYTHONPATH="$ROOT${PYTHONPATH:+;$PYTHONPATH}"
+
 MODEL="${PDF2ZH_MODEL:-inclusionai/ling-3.0-flash-sante:free}"
 # Extraction de glossaire : longcat-2.5, seul modele gratuit qui supporte
 # response_format=json_object (ling-sante renvoie HTTP 400). L'extracteur
