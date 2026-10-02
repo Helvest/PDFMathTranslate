@@ -96,60 +96,6 @@ CONFLITS = {
 
 ETAPES = ("contexte", "polices", "glossaire", "traduire")
 
-# "tout" enchaine les 4 etapes dans l'ordre, en un seul processus.
-ETAPES_TOUT = ("contexte", "polices", "glossaire", "traduire")
-
-RE_PROGRESS = re.compile(r"^\[PROGRESS\]\s+(\d+)/(\d+)\s*(.*)$")
-
-# Etat du bench : global, un seul a la fois.
-BENCH: dict = {"etat": "pret", "log": "", "debut": None, "erreur": ""}
-
-
-# ---------------------------------------------------------------- securite
-
-def _projet(nom: str) -> Path:
-    """Chemin d'un projet, en refusant toute sortie de Projets/."""
-    if not re.fullmatch(r"[A-Za-z0-9 _-]{1,64}", nom):
-        raise HTTPException(400, "nom de projet invalide")
-    p = (PROJETS / nom).resolve()
-    if PROJETS.resolve() not in p.parents and p != PROJETS.resolve():
-        raise HTTPException(400, "chemin hors de Projets/")
-    return p
-
-
-def _fichier(projet: Path, chemin: str) -> Path:
-    """Chemin d'un fichier dans un projet, en refusant les remontees."""
-    p = (projet / chemin).resolve()
-    if projet.resolve() not in p.parents:
-        raise HTTPException(400, "chemin hors du projet")
-    return p
-
-
-def _liste_projets() -> list[dict]:
-    if not PROJETS.is_dir():
-        return []
-    out = []
-    for d in sorted(PROJETS.iterdir()):
-        # .corbeille et .downloads sont des dossiers techniques, pas des projets
-        if not d.is_dir() or d.name.startswith("."):
-            continue
-        meta = d / "projet.json"
-        infos = {"nom": d.name}
-        if meta.is_file():
-            try:
-                infos.update(json.loads(meta.read_text(encoding="utf-8")))
-            except (json.JSONDecodeError, OSError):
-                pass
-        infos["nom"] = d.name  # le dossier fait foi
-        src = d / "source"
-        infos["pdfs"] = len(list(src.glob("*.pdf"))) if src.is_dir() else 0
-        infos["etapes"] = _etat_projet(d.name)
-        out.append(infos)
-    return out
-
-
-# ---------------------------------------------------------------- etapes
-
 def _etat_projet(nom: str) -> dict:
     """Etat des 4 etapes, avec les blocages calcules."""
     with VERROU:
@@ -224,8 +170,7 @@ def _options(projet: str) -> dict:
 def _demarrer(projet: str, etape: str) -> subprocess.Popen:
     """Construit la commande et lance le processus, SANS le suivre.
 
-    Separe de _lancer pour que l'enchainement "tout" puisse attendre la fin
-    de chaque etape avant de lancer la suivante.
+    Separe de _lancer : on peut ainsi lancer sans suivre, si besoin.
     """
     dossier = PROJETS / projet
     log_path = dossier / "analyse" / f"{etape}.log"
@@ -811,7 +756,7 @@ def api_etape_suivante(nom: str):
 
 @app.post("/api/projets/{nom}/etape/{etape}")
 def api_lancer_etape(nom: str, etape: str):
-    if etape not in ETAPES and etape != "tout":
+    if etape not in ETAPES:
         raise HTTPException(400, f"etape inconnue : {etape}")
     p = _projet(nom)
     if not p.is_dir():
@@ -833,36 +778,6 @@ def api_lancer_etape(nom: str, etape: str):
             "log": "",
             "debut": datetime.now().isoformat(timespec="seconds"),
         }
-
-    if etape == "tout":
-        # on enchaine dans un seul fil : chaque etape attend la precedente
-        etats["tout"] = {
-            "etat": "en_cours",
-            "fait": 0,
-            "total": 0,
-            "log": "",
-            "debut": datetime.now().isoformat(timespec="seconds"),
-        }
-
-        def enchainer() -> None:
-            for e in ETAPES_TOUT:
-                with VERROU:
-                    etats[e] = {
-                        "etat": "en_cours", "fait": 0, "total": 0,
-                        "log": "", "debut": datetime.now().isoformat(timespec="seconds"),
-                    }
-                proc = _demarrer(nom, e)
-                _suivre(nom, e, proc)
-                with VERROU:
-                    if etats[e].get("etat") == "erreur":
-                        etats["tout"]["etat"] = "erreur"
-                        etats["tout"]["erreur"] = f"{e} a echoue"
-                        return
-            with VERROU:
-                etats["tout"]["etat"] = "termine"
-
-        threading.Thread(target=enchainer, daemon=True).start()
-        return {"ok": True, "etape": "tout"}
 
     _lancer(nom, etape)
     return {"ok": True, "etape": etape}
