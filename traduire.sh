@@ -39,6 +39,10 @@ TERM_QPS="${PDF2ZH_TERM_QPS:-5}"
 POOL="${PDF2ZH_POOL:-5}"
 TERM_POOL="${PDF2ZH_TERM_POOL:-1}"
 GLOSSARY="${PDF2ZH_GLOSSARY:-$WORK/analyse/glossaire.csv}"
+# Extraction automatique du glossaire : DESACTIVEE par defaut. Elle produit des
+# entrees source == cible qui forcent la non-traduction et degradent le rendu.
+# PDF2ZH_GLOSSAIRE_AUTO=1 la reactive si on le souhaite.
+GLOSSAIRE_AUTO="${PDF2ZH_GLOSSAIRE_AUTO:-0}"
 
 if ! curl -sf "$PROXY/models" -H "Authorization: Bearer hermes" >/dev/null; then
   echo "AVERTISSEMENT: proxy Hermes injoignable sur $PROXY" >&2
@@ -63,8 +67,8 @@ for f in "${FILES[@]}"; do
     --lang-in "$LANG_IN" \
     --lang-out "$LANG_OUT" \
     --no-dual \
-    --no-auto-extract-glossary \
-    --glossaries "$GLOSSARY" \
+        $([ "$GLOSSAIRE_AUTO" = "1" ] || echo "--no-auto-extract-glossary") \
+        --glossaries "$GLOSSARY" \
     --watermark-output-mode no_watermark \
     --auto-enable-ocr-workaround \
     --output "$WORK/traduits" \

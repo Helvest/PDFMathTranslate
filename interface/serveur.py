@@ -246,6 +246,7 @@ def _demarrer(projet: str, etape: str) -> subprocess.Popen:
             "PDF2ZH_TERM_QPS": str(o["term_qps"]),
             "PDF2ZH_POOL": str(o["pool_max_workers"]),
             "PDF2ZH_TERM_POOL": str(o["term_pool_max_workers"]),
+            "PDF2ZH_GLOSSAIRE_AUTO": "0" if o.get("glossaire_manuel", True) else "1",
         }
         # la selection de PDFs passe en arguments positionnels
         if o.get("pdfs_traduire"):
