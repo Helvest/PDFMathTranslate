@@ -473,6 +473,11 @@ async function chargerModeles() {
   }
 }
 
+async function chargerBench() {
+  try { S.bench = await api("/bench/resultats"); }
+  catch (e) { S.bench = null; }
+}
+
 async function chargerProjet(nom) {
   S.actif = nom;
   if (S.vue === "bench") S.vue = "config";
@@ -710,6 +715,34 @@ async function vueConfig(v) {
   }
 }
 
+// Deux noms de modeles designent-ils la meme chose ?
+function memeModele(a, b) {
+  return String(a ?? "").toLowerCase() === String(b ?? "").toLowerCase();
+}
+
+// Modeles en echec au dernier test : {modele: raison}.
+// On lit la MOINDRE config : un modele qui a reussi une fois n'est pas mort.
+function echecsModeles() {
+  const out = new Map();
+  const confs = S.bench?.configs || {};
+  const raisons = (l) => {
+    const e = (l.erreur || "").match(/HTTP Error (\d+)/);
+    if (e) return e[1] === "404" ? "404" : e[1] === "400" ? "400" : e[1];
+    return "echec";
+  };
+  for (const lignes of Object.values(confs)) {
+    for (const l of lignes || []) {
+      const ok = Number((l.ok || "0/0").split("/")[0]);
+      if (ok > 0) {
+        out.delete(l.modele);          // il a reussi quelque part
+      } else if (!out.has(l.modele)) {
+        out.set(l.modele, raisons(l));
+      }
+    }
+  }
+  return out;
+}
+
 // --- options ---
 // Liste deroulante des modeles, avec les chiffres du dernier bench en aide.
 function listeModeles(cle, libelle, aide = "") {
@@ -735,17 +768,31 @@ function listeModeles(cle, libelle, aide = "") {
     return `${lat}s${tok}`;
   };
 
+  // Un modele qui n'a jamais reussi est signale, avec la raison. On le garde
+  // visible : l'utilisateur doit comprendre POURQUOI il echoue plutot que
+  // croire a une erreur de sa part.
+  const echecs = echecsModeles();
+
   const options = S.modeles.length
     ? S.modeles.map((m) => {
         const d = detail(m);
+        const e = echecs.get(m);
+        if (e) {
+          return `<option value="${echapper(m)}" disabled`
+            + ` title="Echec au dernier test : ${echapper(e)}">`
+            + `${echapper(m)}  ✕ ${echapper(e)}</option>`;
+        }
         return `<option value="${echapper(m)}" ${m === courant ? "selected" : ""}>`
           + `${echapper(m)}${d ? "  —  " + d : ""}</option>`;
       }).join("")
     // le modele courant n'est pas forcement dans la liste : on le garde
     : (courant ? `<option value="${echapper(courant)}" selected>${echapper(courant)}</option>` : "");
 
+  const nMorts = [...echecs.keys()].filter((m) => S.modeles.includes(m)).length;
   return `<label class="champ"><span>${libelle}${aide ? " — " + aide : ""}</span>
     <select data-opt="${cle}" style="width:100%">${options}</select>
+    ${nMorts ? `<span class="faible" style="color:var(--erreur)">
+      ${nMorts} modele(s) en echec au dernier test — selectionnes impossibles</span>` : ""}
     ${S.modelesErreur ? `<span class="faible" style="color:var(--erreur)">
       ${echapper(S.modelesErreur)} — liste indisponible</span>` : ""}</label>`;
 }
@@ -793,6 +840,17 @@ async function vueOptions(v) {
 
   v.querySelector("#sv-options").addEventListener("click", async () => {
     const out = { ...S.options };
+    const echecs = echecsModeles();
+
+    // un <option disabled> reste selectionnable par script : on verifie ici
+    for (const el of v.querySelectorAll("select[data-opt]")) {
+      const valeur = el.value;
+      const estEchec = [...echecs.keys()].some((m) => memeModele(m, valeur));
+      if (estEchec) {
+        return notif(`${valeur} a echec au dernier test — choix refuse`, true);
+      }
+    }
+
     v.querySelectorAll("[data-opt]").forEach((el) => {
       out[el.dataset.opt] = el.type === "checkbox" ? el.checked
         : el.type === "number" ? Number(el.value) : el.value;
@@ -1554,7 +1612,10 @@ $("#nom-projet").addEventListener("keydown", (e) => {
 async function init() {
   await majProxy();
   setInterval(majProxy, 10000);   // reverifie regulierement
-  await chargerModeles();
+  await Promise.all([
+    chargerModeles(),
+    chargerBench(),          // pour savoir quels modeles ont echoue
+  ]);
   suivreBench();
   await chargerProjets();
 }
