@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Passe d'analyse d'un lot de PDFs : contexte, glossaire, polices.
 
-Produit dans ../Work/analyse/ :
+Produit dans <projet>/analyse/ :
   contexte.md    description globale du lot + une section par page
   glossaire.csv  source,target,tgt_lng,source_pdf   (format babeldoc + origine)
   polices.csv    police_origine,famille,fichier_remplacement,source_pdf
@@ -11,7 +11,7 @@ Relancer le script ne detruit RIEN : les entrees deja presentes (donc deja
 corrigees a la main) sont conservees, seules les nouveautes sont ajoutees.
 
 Usage:
-  .venv/Scripts/python.exe analyser.py                     # ../Work/source/
+  .venv/Scripts/python.exe analyser.py                     # <projet>/source/
   .venv/Scripts/python.exe analyser.py "chemin/source" -o "chemin/travail"
 """
 from __future__ import annotations
@@ -292,7 +292,7 @@ def _chercher_manquantes(
     Si l'utilisateur a ecrit des consignes, un LLM en tire d'abord un plan
     (sites prioritaires, polices imposees, interdits), qui pilote la recherche.
 
-    N'installe RIEN dans font_dir : les archives restent dans Work/downloads/.
+    N'installe RIEN dans font_dir : les archives restent dans <projet>/downloads/.
     """
     manquantes = [n for n, e in found.items() if not e.get("fichier")]
     if not manquantes:
@@ -368,8 +368,8 @@ def _chercher_manquantes(
             print(f"      {'':24} -> rien trouve ({res.erreur})")
 
     if trouvees:
-        print(f"  {trouvees} archive(s) dans Work/downloads/ - a installer a la main")
-        print("    pour installer : copier le .ttf voulu dans Work/analyse/polices/")
+        print(f"  {trouvees} archive(s) dans <projet>/downloads/ - a installer a la main")
+        print("    pour installer : copier le .ttf voulu dans <projet>/analyse/polices/")
         print("    puis renseigner 'remplacement' dans polices.csv")
 
 
@@ -384,7 +384,7 @@ def step_fonts(
     """Polices : aucun LLM pour la detection, instantane.
 
     Si auto_download, les polices sans remplacement sont cherchees sur les
-    trois sources. Les archives vont dans Work/downloads/ ; rien n'est
+    trois sources. Les archives vont dans <projet>/downloads/ ; rien n'est
     installe automatiquement dans polices/ (c'est un choix manuel).
 
     Colonnes du CSV, dans l'ordre ou on les lit a la main :
@@ -455,7 +455,7 @@ def step_fonts(
     #
     # `remplacement` = ce qui est REELLEMENT installe (fichier present dans
     # polices/). `propose` = ce que la recherche a trouve, a copier depuis
-    # Work/downloads/ si on le veut.
+    # <projet>/downloads/ si on le veut.
     rows, seen = [], set()
     for name, r in existing.items():
         if name not in found:

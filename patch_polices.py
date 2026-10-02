@@ -173,7 +173,7 @@ def _auto_test() -> int:
 
     chargees = module_polices.charger()
     if not chargees:
-        print("aucune police chargee -> deposer des .ttf dans Work/analyse/polices/")
+        print("aucune police chargee -> deposer des .ttf dans <projet>/analyse/polices/")
         print("et renseigner fichier_remplacement dans polices.csv")
         return 0
 

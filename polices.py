@@ -3,11 +3,11 @@
 
 Lit le mapping manuel produit par analyser.py :
 
-    ../Work/analyse/polices.csv          police_origine,famille,fichier_remplacement,source_pdf
-    ../Work/analyse/polices/             les .ttf de remplacement
+    Projets/<projet>/analyse/polices.csv    police_origine,remplacement,origine,...
+    Projets/<projet>/analyse/polices/       les .ttf de remplacement
 
-et le transforme en objets prets a etre injectes dans le FontMapper de
-BabelDOC.
+Le projet se choisit par la variable PDF2ZH_PROJET (positionnee par
+traduire.sh), sinon le premier projet trouve.
 
 Pourquoi ce module existe : BabelDOC n'offre aucun moyen de fournir ses
 propres polices (le parametre TranslationConfig.font est neutralise :
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,11 +29,39 @@ import pymupdf
 
 logger = logging.getLogger(__name__)
 
-# Le dossier de travail est hors du depot (voir references/passe-analyse.md).
+# Les donnees vivent hors du depot, un dossier par projet.
 REPO = Path(__file__).resolve().parent
-WORK = REPO.parent / "Work"
-CSV_DEFAUT = WORK / "analyse" / "polices.csv"
-DOSSIER_TTF_DEFAUT = WORK / "analyse" / "polices"
+PROJETS = REPO.parent / "Projets"
+
+
+def projet_courant() -> Path | None:
+    """Le projet a utiliser : PDF2ZH_PROJET, sinon le premier trouve.
+
+    Retourne None si aucun projet n'existe, pour que les appelants puissent
+    continuer sans polices custom plutot que de planter.
+    """
+    nom = os.environ.get("PDF2ZH_PROJET")
+    if nom:
+        p = PROJETS / nom
+        if p.is_dir():
+            return p
+        logger.warning("projet '%s' introuvable dans %s", nom, PROJETS)
+    if PROJETS.is_dir():
+        for d in sorted(PROJETS.iterdir()):
+            if d.is_dir() and not d.name.startswith("."):
+                return d
+    return None
+
+
+DOSSIER_TTF_DEFAUT: Path | None = None  # calcule a l'appel (le projet peut changer)
+
+
+def chemins(projet: Path | None = None) -> tuple[Path, Path]:
+    """(csv, dossier des TTF) pour un projet. (None, None) si aucun projet."""
+    p = projet or projet_courant()
+    if p is None:
+        return Path(), Path()
+    return p / "analyse" / "polices.csv", p / "analyse" / "polices"
 
 # Extensions acceptees pour un fichier de remplacement.
 EXTS = (".ttf", ".otf")
@@ -89,14 +118,21 @@ def _encoding_length(font: pymupdf.Font) -> int:
 def charger(
     csv_path: Path | str | None = None,
     dossier_ttf: Path | str | None = None,
+    projet: Path | None = None,
 ) -> dict[str, PoliceCustom]:
     """Charge le mapping. Retourne {nom_origine: PoliceCustom}.
 
-    Les lignes sans fichier_remplacement sont ignorees (detection auto de
-    BabelDOC). Un fichier introuvable est signale et ignore, jamais fatal.
+    Sans chemin explicite, on prend le projet courant (PDF2ZH_PROJET, sinon le
+    premier trouve). Les lignes sans remplacement sont ignorees (detection auto
+    de BabelDOC). Un fichier introuvable est signale et ignore, jamais fatal.
     """
-    csv_path = Path(csv_path) if csv_path else CSV_DEFAUT
-    dossier_ttf = Path(dossier_ttf) if dossier_ttf else DOSSIER_TTF_DEFAUT
+    if csv_path is None or dossier_ttf is None:
+        csv_defaut, ttf_defaut = chemins(projet)
+        csv_path = csv_path or csv_defaut
+        dossier_ttf = dossier_ttf or ttf_defaut
+
+    csv_path = Path(csv_path)
+    dossier_ttf = Path(dossier_ttf)
 
     if not csv_path.is_file():
         logger.debug("pas de mapping de polices : %s", csv_path)
@@ -106,7 +142,10 @@ def charger(
     with csv_path.open(encoding="utf-8-sig", newline="") as f:
         for ligne in csv.DictReader(f):
             nom = (ligne.get("police_origine") or "").strip()
-            fichier = (ligne.get("fichier_remplacement") or "").strip()
+            # la colonne s'appelle 'remplacement' (ancien nom : fichier_remplacement)
+            fichier = (
+                ligne.get("remplacement") or ligne.get("fichier_remplacement") or ""
+            ).strip()
             if not nom or not fichier:
                 continue
 
@@ -147,10 +186,18 @@ def charger(
 
 def _auto_test() -> int:
     """Verifie le chargement sur le mapping reel du projet."""
-    print(f"mapping : {CSV_DEFAUT}")
-    print(f"dossier : {DOSSIER_TTF_DEFAUT}")
+    projet = projet_courant()
+    if projet is None:
+        print(f"aucun projet dans {PROJETS}")
+        print("cree-en un :  analyser.py --projet <nom> --creer")
+        return 0
 
-    if not CSV_DEFAUT.is_file():
+    csv_defaut, ttf_defaut = chemins(projet)
+    print(f"projet  : {projet.name}")
+    print(f"mapping : {csv_defaut}")
+    print(f"dossier : {ttf_defaut}")
+
+    if not csv_defaut.is_file():
         print("  (pas de polices.csv -> rien a tester)")
         return 0
 

@@ -20,7 +20,7 @@ fi
 V2="$ROOT/pdf2zh/kernel/PDFMathTranslate-next.git/.venv/Scripts/pdf2zh_next.exe"
 
 # Polices custom : sitecustomize.py est importe automatiquement par Python si
-# son dossier est dans PYTHONPATH. Il charge Work/analyse/polices.csv et
+# son dossier est dans PYTHONPATH. Il charge <projet>/analyse/polices.csv et
 # patche le FontMapper de BabelDOC. PDF2ZH_NO_FONTS=1 pour desactiver.
 export PYTHONPATH="$ROOT${PYTHONPATH:+;$PYTHONPATH}"
 

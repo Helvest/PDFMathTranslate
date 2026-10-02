@@ -15,8 +15,10 @@ SOURCES, dans l'ordre :
     dafontfree.io  scraping HTML. Beaucoup de choix, qualite variable.
     dafont.com     scraping HTML. Idem.
 
-Tout ce qui est telecharge va dans Work/downloads/ et n'en bouge pas :
-l'installation dans Work/analyse/polices/ reste un choix manuel.
+Tout ce qui est telecharge va dans <projet>/downloads/ et n'en bouge pas :
+l'installation dans <projet>/analyse/polices/ reste un choix manuel.
+
+Le projet se choisit par PDF2ZH_PROJET, sinon le premier projet trouve.
 """
 from __future__ import annotations
 
@@ -49,7 +51,21 @@ def _parse_json_array(raw: str):
 
 
 REPO = Path(__file__).resolve().parent
-DOWNLOADS = REPO.parent / "Work" / "downloads"
+PROJETS = REPO.parent / "Projets"
+
+
+def dossier_downloads(projet: Path | None = None) -> Path:
+    """<projet>/downloads. Repli sur Projets/.downloads si aucun projet."""
+    import polices as _polices
+
+    p = projet or _polices.projet_courant()
+    if p is None:
+        return PROJETS / ".downloads"
+    return p / "downloads"
+
+
+# Compatibilite : ancien nom, resolu au premier usage.
+DOWNLOADS = PROJETS / ".downloads"
 EXTS_POLICE = (".ttf", ".otf")
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 TIMEOUT = 90
@@ -413,7 +429,7 @@ def _ecrire(data: bytes, nom: str, dossier: Path) -> tuple[Path | None, list[Pat
 
 def telecharger_candidat(candidat: Candidat, dossier: Path | None = None) -> Resultat:
     """Telecharge un candidat precis."""
-    dossier = dossier or DOWNLOADS
+    dossier = dossier or dossier_downloads()
     dossier.mkdir(parents=True, exist_ok=True)
     res = Resultat(demandee=candidat.nom, candidat=candidat)
 
@@ -463,7 +479,7 @@ def telecharger(
     Ne leve jamais : remplit .erreur. Si rien n'est trouve, l'appelant laisse
     remplacement vide et BabelDOC utilisera sa police par defaut.
     """
-    dossier = dossier or DOWNLOADS
+    dossier = dossier or dossier_downloads()
     dossier.mkdir(parents=True, exist_ok=True)
     res = Resultat(demandee=nom)
 
@@ -561,7 +577,7 @@ def _mots_cles(nom: str, famille: str = "", contexte: str = "") -> list[str]:
 
 def _auto_test() -> int:
     """Verifie les 3 sources et la cascade."""
-    print(f"destination : {DOWNLOADS}")
+    print(f"destination : {dossier_downloads()}")
 
     print("\n--- 1. Google Fonts : 'jost' ---")
     for c in chercher_google("jost")[:3]:
