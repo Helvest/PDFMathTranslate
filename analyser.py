@@ -173,38 +173,176 @@ def _fichier_present(fichier: str, font_dir: Path) -> bool:
     return any(c.is_file() for c in candidats)
 
 
-def _chercher_manquantes(found: dict[str, dict], font_dir: Path, contexte: str = "") -> None:
-    """Cherche sur dafontfree.io les polices sans remplacement.
+CONSIGNES_PROMPT = """Tu prepares la recherche de polices de remplacement pour un lot de PDFs.
+
+L'utilisateur a ecrit des consignes. Lis-les attentivement.
+
+=== CONSIGNES DE L'UTILISATEUR ===
+{consignes}
+=== FIN DES CONSIGNES ===
+
+Polices utilisees dans les documents :
+{polices}
+
+Contexte des documents :
+{contexte}
+
+A partir des consignes, produis un plan de recherche. Reponds UNIQUEMENT par
+un objet JSON, sans commentaire :
+
+{{
+  "sites": ["https://exemple.com/", ...],
+  "par_police": {{
+    "NomPoliceDuPdf": {{
+      "chercher": ["terme1", "terme2"],
+      "raison": "pourquoi ce choix, en une phrase"
+    }}
+  }},
+  "interdits": ["terme a ne jamais utiliser"],
+  "notes": "remarque generale utile pour la recherche"
+}}
+
+Regles :
+- "sites" : uniquement les sites que l'utilisateur a explicitement demandes.
+  Liste vide si aucun.
+- "par_police" : une entree par police listee ci-dessus. Si l'utilisateur a
+  impose une police precise pour un usage, mets-la en premier dans "chercher".
+- "chercher" : 1 a 4 termes, minuscules, sans tiret. Du plus precis au plus
+  general. PAS de mots generiques seuls (serif, sans, bold).
+- "interdits" : ce que l'utilisateur refuse explicitement.
+- Si les consignes ne disent rien d'utile, renvoie des listes vides et des
+  "chercher" vides : le systeme fera sa recherche automatique normale.
+"""
+
+
+def _lire_consignes(chemin: Path) -> str:
+    """Lit le fichier de consignes de l'utilisateur, s'il existe.
+
+    On retire les lignes de commentaire pur (titres markdown, separateurs) pour
+    ne pas noyer le LLM, mais on garde tout le texte ecrit.
+    """
+    if not chemin.is_file():
+        return ""
+    texte = chemin.read_text(encoding="utf-8", errors="replace")
+    lignes = []
+    for ligne in texte.splitlines():
+        s = ligne.strip()
+        # on saute les separateurs et les titres de structure du modele
+        if s in ("---", "***", "___"):
+            continue
+        lignes.append(ligne)
+    return "\n".join(lignes).strip()
+
+
+def _plan_polices(consignes: str, polices: list[str], contexte: str) -> dict:
+    """Demande au LLM un plan de recherche a partir des consignes.
+
+    Retourne {"sites": [...], "par_police": {...}, "interdits": [...], "notes": str}.
+    En cas d'echec, retourne un plan vide (la recherche automatique prend le relais).
+    """
+    vide = {"sites": [], "par_police": {}, "interdits": [], "notes": ""}
+    if not consignes.strip():
+        return vide
+
+    raw = llm(
+        CONSIGNES_PROMPT.format(
+            consignes=consignes[:6000],
+            polices="\n".join(f"- {p}" for p in polices),
+            contexte=contexte[:2000] or "(aucun)",
+        )
+    )
+    if not raw:
+        return vide
+
+    # le LLM peut renvoyer un objet ou un tableau : on veut l'objet
+    t = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    t = re.sub(r"\s*```$", "", t)
+    i, j = t.find("{"), t.rfind("}")
+    if i == -1 or j == -1:
+        return vide
+    try:
+        plan = json.loads(t[i : j + 1])
+    except json.JSONDecodeError:
+        return vide
+    if not isinstance(plan, dict):
+        return vide
+
+    # normalisation
+    sites = [s for s in plan.get("sites", []) if isinstance(s, str) and s.startswith("http")]
+    par_police = plan.get("par_police", {})
+    if not isinstance(par_police, dict):
+        par_police = {}
+    interdits = [s.lower() for s in plan.get("interdits", []) if isinstance(s, str)]
+    return {
+        "sites": sites,
+        "par_police": par_police,
+        "interdits": interdits,
+        "notes": str(plan.get("notes", "")),
+    }
+
+
+def _chercher_manquantes(
+    found: dict[str, dict],
+    font_dir: Path,
+    contexte: str = "",
+    consignes: str = "",
+) -> None:
+    """Cherche les polices sans remplacement.
+
+    Si l'utilisateur a ecrit des consignes, un LLM en tire d'abord un plan
+    (sites prioritaires, polices imposees, interdits), qui pilote la recherche.
 
     N'installe RIEN dans font_dir : les archives restent dans Work/downloads/.
-    Le resultat est note dans found[name]['piste'] pour que l'utilisateur
-    sache quoi aller chercher.
     """
     manquantes = [n for n, e in found.items() if not e.get("fichier")]
     if not manquantes:
         return
 
-    print(f"  {len(manquantes)} police(s) sans remplacement -> recherche dafontfree.io")
     try:
         import telecharger_polices as dl
     except ImportError:
         print("    (module de telechargement indisponible)")
         return
 
+    # --- plan issu des consignes ------------------------------------------
+    plan = _plan_polices(consignes, manquantes, contexte)
+    if plan["sites"]:
+        dl.ajouter_sites_prioritaires(plan["sites"])
+        print(f"  consignes : {len(plan['sites'])} site(s) prioritaire(s)")
+        for s in plan["sites"]:
+            print(f"    {s}")
+    if plan["notes"]:
+        print(f"  consignes : {plan['notes'][:120]}")
+
+    print(f"  {len(manquantes)} police(s) sans remplacement -> recherche")
+
     trouvees = 0
     for nom in manquantes:
         famille = found[nom]["famille"] or nom
-        # le LLM choisit les termes de recherche (noms usuels, synonymes,
-        # alternatives libres) plutot qu'un decoupage en dur du nom
-        termes = dl._mots_cles(nom, famille, contexte)
-        print(f"    {nom:24} termes : {', '.join(termes) or '(aucun)'}")
+
+        # les consignes priment : si l'utilisateur a impose des termes, on les
+        # utilise tels quels, sinon on demande au LLM de les deduire du nom.
+        impose = plan["par_police"].get(nom) or {}
+        termes = [t for t in impose.get("chercher", []) if isinstance(t, str)]
+        if termes:
+            raison = impose.get("raison", "")
+            print(f"    {nom:24} termes (consignes) : {', '.join(termes)}")
+            if raison:
+                print(f"      {'':24} {raison[:90]}")
+        else:
+            termes = dl._mots_cles(nom, famille, contexte)
+            print(f"    {nom:24} termes : {', '.join(termes) or '(aucun)'}")
+
+        # on retire les termes que l'utilisateur refuse
+        if plan["interdits"]:
+            avant = len(termes)
+            termes = [t for t in termes if not any(i in t.lower() for i in plan["interdits"])]
+            if len(termes) != avant:
+                print(f"      {'':24} ({avant - len(termes)} terme(s) ecarte(s) par les consignes)")
 
         res = dl.telecharger(nom, termes=termes)
         if res.ok:
             trouvees += 1
-            # On propose le CHEMIN du fichier de police utilisable, pas
-            # l'archive : c'est ce que l'utilisateur copiera dans polices/.
-            # L'archive reste dans Work/downloads/ pour reference.
             fichier = res.fichiers[0] if res.fichiers else None
             found[nom]["piste"] = str(res.archive) if res.archive else ""
             found[nom]["propose"] = fichier.name if fichier else ""
@@ -219,7 +357,7 @@ def _chercher_manquantes(found: dict[str, dict], font_dir: Path, contexte: str =
     if trouvees:
         print(f"  {trouvees} archive(s) dans Work/downloads/ - a installer a la main")
         print("    pour installer : copier le .ttf voulu dans Work/analyse/polices/")
-        print("    puis renseigner fichier_remplacement dans polices.csv")
+        print("    puis renseigner 'remplacement' dans polices.csv")
 
 
 def step_fonts(
@@ -293,7 +431,10 @@ def step_fonts(
 
     # recherche automatique des polices non remplacees
     if auto_download:
-        _chercher_manquantes(found, font_dir, contexte)
+        consignes = _lire_consignes(work / "consignes-polices.md")
+        if consignes:
+            print("  consignes-polices.md lu")
+        _chercher_manquantes(found, font_dir, contexte, consignes)
 
     # --- fusion : existant d'abord, puis les nouvelles polices -------------
     # `origine` : auto = propose par le systeme, manuel = choisi par

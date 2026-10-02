@@ -278,13 +278,102 @@ def _dafont_lien(candidat: Candidat) -> str | None:
     return f"https:{m.group(1)}" if m else None
 
 
+def chercher_freefonts(terme: str) -> list[Candidat]:
+    """Cherche sur freefonts.io (WordPress, meme structure que dafontfree)."""
+    q = urllib.parse.quote_plus(terme)
+    page = _get(f"https://www.freefonts.io/?s={q}")
+    if not page:
+        return []
+
+    exclure = {
+        "feed", "contact", "about", "privacy-policy", "dmca", "disclaimer",
+        "terms", "terms-of-service", "category", "tag", "author", "page",
+        "wp-json", "comments", "cookie-policy", "refund-policy", "copyright",
+        "faq", "blog", "news", "download",
+    }
+    cible = _normaliser(terme)
+    vus, out = set(), []
+    for url in re.findall(r'href="(https://www\.freefonts\.io/[a-z0-9][a-z0-9-]*/)"', page):
+        slug = url.rstrip("/").rsplit("/", 1)[-1]
+        if slug in exclure or slug in vus:
+            continue
+        vus.add(slug)
+        nom = re.sub(r"-font$", "", slug).replace("-", " ").strip()
+        out.append(
+            Candidat(nom=nom, source="freefonts", url=url, exact=_normaliser(nom) == cible)
+        )
+        if len(out) >= 6:
+            break
+    return out
+
+
+def _freefonts_lien(candidat: Candidat) -> str | None:
+    """URL de telechargement depuis une page freefonts.io."""
+    page = _get(candidat.url)
+    if not page:
+        return None
+    m = re.search(
+        r'href="(https://www\.freefonts\.io/download/[^"]*wpdmdl=\d+[^"]*)"', page
+    )
+    if m:
+        return html.unescape(m.group(1))
+    m = re.search(r'href="(https://www\.freefonts\.io/download/[a-z0-9-]+/)"', page)
+    if m:
+        inter = _get(html.unescape(m.group(1)), referer=candidat.url)
+        if inter:
+            m2 = re.search(
+                r'href="(https://www\.freefonts\.io/download/[^"]*wpdmdl=\d+[^"]*)"',
+                inter,
+            )
+            if m2:
+                return html.unescape(m2.group(1))
+    return None
+
+
 # ------------------------------------------------------------------ commun
 
 SOURCES: dict[str, tuple] = {
     "google": (chercher_google, None),  # telechargement direct, pas de page
+    "freefonts": (chercher_freefonts, _freefonts_lien),
     "dafontfree": (chercher_dafontfree, _dafontfree_lien),
     "dafont": (chercher_dafont, _dafont_lien),
 }
+
+# Domaines reconnus, pour les sites demandes dans consignes-polices.md.
+DOMAINES = {
+    "fonts.google.com": "google",
+    "freefonts.io": "freefonts",
+    "dafontfree.io": "dafontfree",
+    "dafont.com": "dafont",
+}
+
+# Sites demandes par l'utilisateur dans consignes-polices.md. Ils sont essayes
+# AVANT les sources par defaut. Rempli par ajouter_sites_prioritaires().
+SITES_PRIORITAIRES: list[str] = []
+
+
+def ajouter_sites_prioritaires(urls: list[str]) -> None:
+    """Enregistre des sites a essayer en priorite.
+
+    Un site est reconnu par son domaine. Un domaine inconnu est signale mais
+    ignore : on ne peut pas scraper un site dont on ne connait pas la structure.
+    """
+    for url in urls:
+        domaine = urllib.parse.urlparse(url).netloc.lower().removeprefix("www.")
+        cle = DOMAINES.get(domaine)
+        if cle and cle not in SITES_PRIORITAIRES:
+            SITES_PRIORITAIRES.append(cle)
+        elif not cle:
+            logger.warning("site inconnu, ignore : %s", url)
+
+
+def _ordre_sources(sources: tuple[str, ...]) -> tuple[str, ...]:
+    """Les sites prioritaires d'abord, puis le reste dans l'ordre donne."""
+    if not SITES_PRIORITAIRES:
+        return sources
+    tete = tuple(s for s in SITES_PRIORITAIRES if s in sources)
+    reste = tuple(s for s in sources if s not in tete)
+    return tete + reste
 
 
 def _nom_depuis_url(url: str) -> str:
@@ -380,6 +469,9 @@ def telecharger(
 
     if termes is None:
         termes = _mots_cles(nom)
+
+    # les sites demandes dans consignes-polices.md passent devant
+    sources = _ordre_sources(sources)
 
     # --- PASSE 1 : la vraie police, sur TOUTES les sources -----------------
     for terme in termes:
