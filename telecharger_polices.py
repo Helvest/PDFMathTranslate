@@ -364,8 +364,15 @@ def telecharger(
 ) -> Resultat:
     """Cascade : vraie police -> police similaire -> rien.
 
+    ORDRE (choix utilisateur) : on epuise d'abord TOUTES les sources pour la
+    vraie police, et seulement si aucune ne l'a, on retente TOUTES les sources
+    pour une similaire.
+
+        exacte : google -> dafontfree -> dafont
+        similaire : google -> dafontfree -> dafont
+
     Ne leve jamais : remplit .erreur. Si rien n'est trouve, l'appelant laisse
-    fichier_remplacement vide et BabelDOC utilisera sa police par defaut.
+    remplacement vide et BabelDOC utilisera sa police par defaut.
     """
     dossier = dossier or DOWNLOADS
     dossier.mkdir(parents=True, exist_ok=True)
@@ -374,7 +381,7 @@ def telecharger(
     if termes is None:
         termes = _mots_cles(nom)
 
-    # --- PASSE 1 : la vraie police -----------------------------------------
+    # --- PASSE 1 : la vraie police, sur TOUTES les sources -----------------
     for terme in termes:
         for src in sources:
             candidats = SOURCES[src][0](terme)
@@ -387,7 +394,7 @@ def telecharger(
                 r.demandee, r.terme = nom, terme
                 return r
 
-    # --- PASSE 2 : une police similaire ------------------------------------
+    # --- PASSE 2 : une police similaire, sur TOUTES les sources ------------
     for terme in termes:
         for src in sources:
             candidats = SOURCES[src][0](terme)

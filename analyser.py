@@ -202,11 +202,17 @@ def _chercher_manquantes(found: dict[str, dict], font_dir: Path, contexte: str =
         res = dl.telecharger(nom, termes=termes)
         if res.ok:
             trouvees += 1
-            found[nom]["piste"] = res.archive.name if res.archive else ""
+            # On propose le CHEMIN du fichier de police utilisable, pas
+            # l'archive : c'est ce que l'utilisateur copiera dans polices/.
+            # L'archive reste dans Work/downloads/ pour reference.
+            fichier = res.fichiers[0] if res.fichiers else None
+            found[nom]["piste"] = str(res.archive) if res.archive else ""
+            found[nom]["propose"] = fichier.name if fichier else ""
+            found[nom]["origine"] = "auto"
             archive = res.archive.name if res.archive else "(archive inconnue)"
-            print(f"      {'':24} -> {archive} ({len(res.fichiers)} fichiers)")
-            noms = ", ".join(f.name for f in res.fichiers[:3])
-            print(f"      {'':24}    {noms}")
+            print(f"      {'':24} -> {archive} [{res.type_trouve}] ({len(res.fichiers)} fichiers)")
+            if fichier:
+                print(f"      {'':24}    proposerait : {fichier.name}")
         else:
             print(f"      {'':24} -> rien trouve ({res.erreur})")
 
@@ -224,11 +230,18 @@ def step_fonts(
     auto_download: bool = True,
     contexte: str = "",
 ) -> None:
-    """Polices : aucun LLM, instantane.
+    """Polices : aucun LLM pour la detection, instantane.
 
-    Si auto_download, les polices sans remplacement sont cherchees sur
-    dafontfree.io. Les archives vont dans Work/downloads/ ; rien n'est
+    Si auto_download, les polices sans remplacement sont cherchees sur les
+    trois sources. Les archives vont dans Work/downloads/ ; rien n'est
     installe automatiquement dans polices/ (c'est un choix manuel).
+
+    Colonnes du CSV, dans l'ordre ou on les lit a la main :
+      police_origine      la police du PDF (remplie par le script)
+      remplacement        le fichier choisi (a remplir, ou pre-rempli)
+      origine             auto | manuel | defaut
+      famille             regroupement, sert a la recherche
+      pdfs                quels PDF l'utilisent (informatif, en dernier)
     """
     print("\n[1/3] Polices (sans LLM)")
     found: dict[str, dict] = {}
@@ -250,22 +263,31 @@ def step_fonts(
     # un TTF du bon nom deja depose dans polices/ -> pre-remplissage
     prefilled = 0
     for name, e in found.items():
-        if name in existing and existing[name].get("fichier_remplacement"):
-            e["fichier"] = existing[name]["fichier_remplacement"]
+        ancien = existing.get(name, {})
+        ancien_fichier = (ancien.get("remplacement") or "").strip()
+        ancienne_origine = (ancien.get("origine") or "").strip()
+
+        # 1. un fichier deja choisi ET present : on le garde tel quel
+        if ancien_fichier and _fichier_present(ancien_fichier, font_dir):
+            e["fichier"] = ancien_fichier
+            e["origine"] = ancienne_origine or "manuel"
+        # 2. un fichier choisi mais absent : on le signale et on cherche
+        elif ancien_fichier:
+            e["fichier"] = ""
+            e["origine"] = "defaut"
+            e["absent"] = ancien_fichier
+        # 3. un TTF du bon nom dans polices/ -> pre-remplissage
         elif (font_dir / f"{name}.ttf").exists():
             e["fichier"] = f"{name}.ttf"
+            e["origine"] = "manuel"
             prefilled += 1
         elif (font_dir / f"{name}.otf").exists():
             e["fichier"] = f"{name}.otf"
+            e["origine"] = "manuel"
             prefilled += 1
         else:
-            e["fichier"] = existing.get(name, {}).get("fichier_remplacement", "")
-
-        # Un fichier_remplacement qui ne pointe plus sur rien est efface :
-        # sinon le CSV annonce une police absente et polices.py la signale
-        # comme introuvable a chaque run.
-        if e["fichier"] and not _fichier_present(e["fichier"], font_dir):
             e["fichier"] = ""
+            e["origine"] = "defaut"
     if prefilled:
         print(f"  {prefilled} pre-remplies depuis polices/")
 
@@ -273,34 +295,85 @@ def step_fonts(
     if auto_download:
         _chercher_manquantes(found, font_dir, contexte)
 
-    # fusion : existant d'abord, puis les nouvelles polices
+    # --- fusion : existant d'abord, puis les nouvelles polices -------------
+    # `origine` : auto = propose par le systeme, manuel = choisi par
+    # l'utilisateur, defaut = rien trouve (BabelDOC prend sa police).
+    #
+    # `remplacement` = ce qui est REELLEMENT installe (fichier present dans
+    # polices/). `propose` = ce que la recherche a trouve, a copier depuis
+    # Work/downloads/ si on le veut.
     rows, seen = [], set()
     for name, r in existing.items():
-        if name in found:
-            rows.append(
-                {
-                    "police_origine": name,
-                    "famille": r.get("famille") or found[name]["famille"],
-                    "fichier_remplacement": found[name]["fichier"],
-                    "source_pdf": "|".join(sorted(found[name]["pdfs"])),
-                }
-            )
-            seen.add(name)
+        if name not in found:
+            continue
+        e = found[name]
+        ancien_fichier = (r.get("remplacement") or "").strip()
+        ancien_propose = (r.get("propose") or "").strip()
+
+        # option A : si l'utilisateur a change la valeur par rapport a ce que
+        # le systeme avait propose, la ligne devient "manuel".
+        if ancien_fichier and ancien_fichier != ancien_propose and ancien_propose:
+            origine = "manuel"
+        elif ancien_fichier and _fichier_present(ancien_fichier, font_dir):
+            origine = "manuel"
+        elif e.get("propose"):
+            origine = "auto"
+        else:
+            origine = "defaut"
+
+        rows.append(
+            {
+                "police_origine": name,
+                "remplacement": e["fichier"],
+                "origine": origine,
+                "propose": e.get("propose", ""),
+                "famille": r.get("famille") or e["famille"],
+                "pdfs": _resumer_pdfs(e["pdfs"]),
+            }
+        )
+        seen.add(name)
+
     added = 0
     for name in sorted(found):
         if name in seen:
             continue
         added += 1
+        e = found[name]
         rows.append(
             {
                 "police_origine": name,
-                "famille": found[name]["famille"],
-                "fichier_remplacement": found[name]["fichier"],
-                "source_pdf": "|".join(sorted(found[name]["pdfs"])),
+                "remplacement": e["fichier"],
+                "origine": e["origine"],
+                "propose": e.get("propose", ""),
+                "famille": e["famille"],
+                "pdfs": _resumer_pdfs(e["pdfs"]),
             }
         )
-    write_csv(csv_path, ["police_origine", "famille", "fichier_remplacement", "source_pdf"], rows)
-    print(f"  +{added} nouvelles -> {csv_path.name} ({len(rows)} lignes)")
+
+    write_csv(
+        csv_path,
+        ["police_origine", "remplacement", "origine", "propose", "famille", "pdfs"],
+        rows,
+    )
+    n_auto = sum(1 for r in rows if r["origine"] == "auto")
+    n_man = sum(1 for r in rows if r["origine"] == "manuel")
+    n_def = sum(1 for r in rows if r["origine"] == "defaut")
+    print(
+        f"  +{added} nouvelles -> {csv_path.name} ({len(rows)} lignes : "
+        f"{n_auto} auto, {n_man} manuel, {n_def} defaut)"
+    )
+
+
+def _resumer_pdfs(noms) -> str:
+    """Resume la liste des PDF en '3 pdfs' si elle est longue.
+
+    La colonne est informative : la garder courte rend le CSV lisible a l'oeil.
+    Le detail complet reste dans contexte.md.
+    """
+    noms = sorted(noms)
+    if len(noms) <= 2:
+        return " | ".join(noms)
+    return f"{len(noms)} pdfs"
 
 
 CTX_PAGE_PROMPT = """Tu analyses un document pour preparer sa traduction.
