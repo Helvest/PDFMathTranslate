@@ -173,8 +173,58 @@ def _fichier_present(fichier: str, font_dir: Path) -> bool:
     return any(c.is_file() for c in candidats)
 
 
-def step_fonts(pdfs: list[Path], work: Path, csv_path: Path, font_dir: Path) -> None:
-    """Polices : aucun LLM, instantane."""
+def _chercher_manquantes(found: dict[str, dict], font_dir: Path) -> None:
+    """Cherche sur dafontfree.io les polices sans remplacement.
+
+    N'installe RIEN dans font_dir : les archives restent dans Work/downloads/.
+    Le resultat est note dans found[name]['piste'] pour que l'utilisateur
+    sache quoi aller chercher.
+    """
+    manquantes = [n for n, e in found.items() if not e.get("fichier")]
+    if not manquantes:
+        return
+
+    print(f"  {len(manquantes)} police(s) sans remplacement -> recherche dafontfree.io")
+    try:
+        import telecharger_polices as dl
+    except ImportError:
+        print("    (module de telechargement indisponible)")
+        return
+
+    trouvees = 0
+    for nom in manquantes:
+        # "FuturaPT-Book" -> on cherche la famille, plus efficace
+        famille = found[nom]["famille"] or nom
+        res = dl.telecharger(famille)
+        if res.ok:
+            trouvees += 1
+            found[nom]["piste"] = res.archive.name if res.archive else ""
+            noms = ", ".join(f.name for f in res.fichiers[:3])
+            archive = res.archive.name if res.archive else "(archive inconnue)"
+            print(f"    {nom:24} -> {archive} ({len(res.fichiers)} fichiers)")
+            print(f"      {'':24}    {noms}")
+        else:
+            print(f"    {nom:24} -> rien trouve ({res.erreur})")
+
+    if trouvees:
+        print(f"  {trouvees} archive(s) dans Work/downloads/ - a installer a la main")
+        print("    pour installer : copier le .ttf voulu dans Work/analyse/polices/")
+        print("    puis renseigner fichier_remplacement dans polices.csv")
+
+
+def step_fonts(
+    pdfs: list[Path],
+    work: Path,
+    csv_path: Path,
+    font_dir: Path,
+    auto_download: bool = True,
+) -> None:
+    """Polices : aucun LLM, instantane.
+
+    Si auto_download, les polices sans remplacement sont cherchees sur
+    dafontfree.io. Les archives vont dans Work/downloads/ ; rien n'est
+    installe automatiquement dans polices/ (c'est un choix manuel).
+    """
     print("\n[1/3] Polices (sans LLM)")
     found: dict[str, dict] = {}
     for pdf in pdfs:
@@ -213,6 +263,10 @@ def step_fonts(pdfs: list[Path], work: Path, csv_path: Path, font_dir: Path) -> 
             e["fichier"] = ""
     if prefilled:
         print(f"  {prefilled} pre-remplies depuis polices/")
+
+    # recherche automatique des polices non remplacees
+    if auto_download:
+        _chercher_manquantes(found, font_dir)
 
     # fusion : existant d'abord, puis les nouvelles polices
     rows, seen = [], set()
@@ -441,6 +495,11 @@ def main() -> int:
     ap.add_argument("--skip-context", action="store_true")
     ap.add_argument("--skip-glossary", action="store_true")
     ap.add_argument("--skip-fonts", action="store_true")
+    ap.add_argument(
+        "--no-download",
+        action="store_true",
+        help="ne pas chercher les polices manquantes sur dafontfree.io",
+    )
     a = ap.parse_args()
 
     # defauts relatifs au depot : le dossier de travail est ../Work (hors depot)
@@ -466,7 +525,9 @@ def main() -> int:
     print(f"lot: {len(pdfs)} PDF(s) -> {work}")
 
     if not a.skip_fonts:
-        step_fonts(pdfs, work, work / "polices.csv", font_dir)
+        step_fonts(
+            pdfs, work, work / "polices.csv", font_dir, auto_download=not a.no_download
+        )
     if not a.skip_context:
         ctx = step_context(pdfs, work, work / "contexte.md")
     else:
