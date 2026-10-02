@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pymupdf
 
+import catalogue_polices as catalogue
+
 logger = logging.getLogger(__name__)
 
 # Les donnees vivent hors du depot, un dossier par projet.
@@ -85,23 +87,29 @@ class PoliceCustom:
 
 
 def _resoudre(fichier: str, dossier: Path) -> Path | None:
-    """Trouve le TTF : chemin absolu, relatif au dossier, ou nom nu."""
+    """Trouve le TTF dans les trois sources : projet, global, BabelDOC.
+
+    Le dossier du projet est passe en premier (le plus specifique), puis le
+    catalogue cherche dans le global et le cache de BabelDOC.
+    """
     if not fichier:
         return None
+
     p = Path(fichier)
-    candidats = []
     if p.is_absolute():
-        candidats.append(p)
-    else:
-        candidats.append(dossier / p)
-        candidats.append(REPO / p)
-    # si l'extension manque, on essaie .ttf puis .otf
+        return p if p.is_file() else None
+
+    # 1. le dossier du projet, explicitement (le catalogue peut ne pas le voir)
+    candidats = [dossier / p]
     if p.suffix.lower() not in EXTS:
         candidats += [c.with_suffix(e) for c in list(candidats) for e in EXTS]
     for c in candidats:
         if c.is_file():
             return c
-    return None
+
+    # 2. puis le catalogue : global, puis BabelDOC, puis le depot
+    chemin, _source = catalogue.resoudre(fichier)
+    return chemin
 
 
 def _encoding_length(font: pymupdf.Font) -> int:
@@ -134,50 +142,80 @@ def charger(
     csv_path = Path(csv_path)
     dossier_ttf = Path(dossier_ttf)
 
-    if not csv_path.is_file():
-        logger.debug("pas de mapping de polices : %s", csv_path)
+    if not csv_path.is_file() and not catalogue.CSV_GLOBAL.is_file():
+        logger.debug("aucun mapping de polices")
         return {}
+    if not csv_path.is_file():
+        # pas de mapping projet : on prendra celui du global
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        csv_path.write_text(
+            "police_origine,remplacement,origine,propose,raison,famille,spans,pages,pdfs\n",
+            encoding="utf-8-sig",
+        )
+
+    # Le mapping se lit en cascade : une entree du projet gagne, sinon celle
+    # du global. Modifier Global/polices.csv change donc tous les projets qui
+    # n'ont pas d'entree propre.
+    lignes: list[dict] = []
+    with csv_path.open(encoding="utf-8-sig", newline="") as f:
+        lignes = list(csv.DictReader(f))
+
+    # Une ligne du projet SANS remplacement ne compte pas comme un choix : elle
+    # signifie "pas encore decide". Le global doit pouvoir la completer. Seules
+    # les lignes avec un remplacement effectif bloquent la cascade.
+    connus = {
+        (l.get("police_origine") or "").strip()
+        for l in lignes
+        if (l.get("remplacement") or l.get("fichier_remplacement") or "").strip()
+    }
+    if catalogue.CSV_GLOBAL.is_file() and catalogue.CSV_GLOBAL != csv_path:
+        try:
+            with catalogue.CSV_GLOBAL.open(encoding="utf-8-sig", newline="") as f:
+                for l in csv.DictReader(f):
+                    if (l.get("police_origine") or "").strip() not in connus:
+                        lignes.append(l)
+        except (OSError, csv.Error) as e:
+            logger.warning("mapping global illisible : %s", e)
 
     resultat: dict[str, PoliceCustom] = {}
-    with csv_path.open(encoding="utf-8-sig", newline="") as f:
-        for ligne in csv.DictReader(f):
-            nom = (ligne.get("police_origine") or "").strip()
-            # la colonne s'appelle 'remplacement' (ancien nom : fichier_remplacement)
-            fichier = (
-                ligne.get("remplacement") or ligne.get("fichier_remplacement") or ""
-            ).strip()
-            if not nom or not fichier:
-                continue
+    for ligne in lignes:
+        nom = (ligne.get("police_origine") or "").strip()
+        # la colonne s'appelle 'remplacement' (ancien nom : fichier_remplacement)
+        fichier = (
+            ligne.get("remplacement") or ligne.get("fichier_remplacement") or ""
+        ).strip()
+        if not nom or not fichier:
+            continue
 
-            chemin = _resoudre(fichier, dossier_ttf)
-            if chemin is None:
-                logger.warning(
-                    "police introuvable pour %s : %s (cherche dans %s)",
-                    nom,
-                    fichier,
-                    dossier_ttf,
-                )
-                continue
-
-            try:
-                font = pymupdf.Font(fontfile=str(chemin))
-            except Exception as e:  # noqa: BLE001 - on ne veut jamais planter ici
-                logger.warning("police illisible %s : %s", chemin, e)
-                continue
-
-            resultat[nom] = PoliceCustom(
-                nom_origine=nom,
-                famille=(ligne.get("famille") or "").strip(),
-                chemin=chemin,
-                font=font,
-                ascent=font.ascender,
-                descent=font.descender,
-                encoding_length=_encoding_length(font),
-                bold=bool(font.is_bold),
-                italic=bool(font.is_italic),
-                serif=bool(font.is_serif),
-                monospace=bool(font.is_monospaced),
+        chemin = _resoudre(fichier, dossier_ttf)
+        if chemin is None:
+            logger.warning(
+                "police introuvable pour %s : %s (cherche dans %s)",
+                nom,
+                fichier,
+                dossier_ttf,
             )
+            continue
+
+        try:
+            font = pymupdf.Font(fontfile=str(chemin))
+        except Exception as e:  # noqa: BLE001 - on ne veut jamais planter ici
+            logger.warning("police illisible %s : %s", chemin, e)
+            continue
+
+        resultat[nom] = PoliceCustom(
+            nom_origine=nom,
+            famille=(ligne.get("famille") or "").strip(),
+            chemin=chemin,
+            font=font,
+            ascent=font.ascender,
+            descent=font.descender,
+            encoding_length=_encoding_length(font),
+            bold=bool(font.is_bold),
+            italic=bool(font.is_italic),
+            serif=bool(font.is_serif),
+            monospace=bool(font.is_monospaced),
+        )
 
     if resultat:
         logger.info("%d police(s) custom chargee(s)", len(resultat))

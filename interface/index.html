@@ -411,6 +411,13 @@ function appliquerTri(liste, table, numerique = []) {
   });
 }
 
+// Le CSV stocke le nom de fichier ('metrofutura.ttf'), le catalogue propose
+// le nom sans extension ('metrofutura'). On compare donc sans extension.
+function memePolice(a, b) {
+  const n = (s) => String(s ?? "").toLowerCase().replace(/\.(ttf|otf|ttc)$/, "");
+  return !!a && !!b && n(a) === n(b);
+}
+
 // ---------------------------------------------------------------- projets
 
 async function chargerProjets() {
@@ -769,38 +776,64 @@ async function vuePolices(v) {
     api(`/projets/${nom}`),
   ]);
   let lignes = csvLignes(csv.contenu);
-  const pol = det.polices_installees || { installees: [], telechargees: [], proposees: [], toutes: [] };
-  const installees = new Set(pol.installees || []);
-  const dispo = pol.toutes || [];
+  const pol = det.polices_installees || {};
+  const duProjet = pol.projet || [];
+  const globales = pol.global || [];
+  const babeldoc = pol.babeldoc || [];
+  const installees = new Set(duProjet.map((x) => x.nom));
 
-  // tri par colonne (spans et pages sont des nombres)
   lignes = appliquerTri(lignes, "polices", ["spans", "pages"]);
+
+  // La liste deroulante : les trois provenances, groupees par <optgroup>.
+  const groupes = [
+    ["Projet", duProjet],
+    ["Global (partage)", globales],
+    ["BabelDOC (par defaut)", babeldoc],
+  ];
+  const options = (choisi) => {
+    let out = '<option value="">— police par defaut —</option>';
+    for (const [titre, liste] of groupes) {
+      if (!liste.length) continue;
+      out += `<optgroup label="${echapper(titre)} (${liste.length})">`;
+      for (const f of liste) {
+        const sel = memePolice(f.nom, choisi) ? "selected" : "";
+        out += `<option value="${echapper(f.nom)}" ${sel}>${echapper(f.nom)}</option>`;
+      }
+      out += `</optgroup>`;
+    }
+    return out;
+  };
 
   let html = `<div class="bloc">
     <h2 class="titre">Detectees dans les PDFs — ${lignes.length}</h2>`;
   if (!lignes.length) {
     html += `<p class="vide">Lance l'etape Polices pour detecter.</p>`;
   } else {
-    html += `<div class="scroll-tab"><table><tr>
-      ${entete("polices", "police_origine", "Police d'origine")}
-      ${entete("polices", "remplacement", "Remplacee par")}
-      ${entete("polices", "origine", "Origine")}
-      ${entete("polices", "propose", "Propose")}
-      ${entete("polices", "famille", "Famille")}
-      ${entete("polices", "spans", "Usage")}
-      ${entete("polices", "pdfs", "PDFs")}
-    </tr>`;
+    html += `<p class="faible" style="margin:0 0 7px">
+      ${duProjet.length} dans le projet · ${globales.length} globales ·
+      ${babeldoc.length} BabelDOC. Le bouton <b>installer</b> copie la police
+      dans le projet et remplit la ligne.</p>
+      <div class="scroll-tab"><table><tr>
+        ${entete("polices", "police_origine", "Police d'origine")}
+        ${entete("polices", "remplacement", "Remplacee par")}
+        ${entete("polices", "origine", "Origine")}
+        ${entete("polices", "propose", "Propose")}
+        ${entete("polices", "famille", "Famille")}
+        ${entete("polices", "spans", "Usage")}
+        ${entete("polices", "pdfs", "PDFs")}
+      </tr>`;
     for (const l of lignes) {
-      const opts = ['<option value="">— police par defaut —</option>'].concat(
-        dispo.map((f) => {
-          const marque = installees.has(f) ? " ✓" : "";
-          const sel = f === l.remplacement ? "selected" : "";
-          return `<option value="${echapper(f)}" ${sel}>${echapper(f)}${marque}</option>`;
-        })).join("");
-      const usage = Number(l.spans) ? `${l.spans}\u00d7 / ${l.pages || 1}p` : "—";
+      const usage = Number(l.spans) ? `${l.spans}× / ${l.pages || 1}p` : "—";
+      const dansProjet = [...installees].some((i) => memePolice(i, l.remplacement));
       html += `<tr>
         <td>${echapper(l.police_origine)}</td>
-        <td><select data-pol="${echapper(l.police_origine)}" style="max-width:210px">${opts}</select></td>
+        <td class="rangee" style="gap:4px">
+          <select data-pol="${echapper(l.police_origine)}" style="max-width:200px">
+            ${options(l.remplacement)}</select>
+          <button class="btn mini" data-inst="${echapper(l.police_origine)}"
+            title="Copier la police choisie dans le projet et remplir la ligne"
+            ${dansProjet ? "disabled" : ""}>${dansProjet ? "✓" : "installer"}</button>
+        </td>
         <td><span class="tag ${echapper(l.origine || "defaut")}">${echapper(l.origine || "defaut")}</span></td>
         <td class="faible">${echapper(l.propose || "—")}</td>
         <td class="faible">${echapper(l.famille || "")}</td>
@@ -809,37 +842,48 @@ async function vuePolices(v) {
       </tr>`;
     }
     html += `</table></div><div style="margin-top:8px"><button class="btn acc" id="sv-polices">
-      Enregistrer</button></div>`;
+      Enregistrer les choix</button></div>`;
   }
   html += `</div>`;
 
   html += `<div class="bloc">
-    <h2 class="titre">Polices disponibles</h2>
-    <p class="faible" style="margin:0 0 7px">
-      Installees : ${pol.installees?.length || 0} ·
-      dans les archives : ${pol.telechargees?.length || 0} ·
-      proposees : ${pol.proposees?.length || 0}</p>`;
-  const groupes = [
-    ["Installees (utilisables)", pol.installees || [], "installe"],
-    ["Dans les archives (a installer)",
-     (pol.telechargees || []).filter((t) => !installees.has(t.split("/").pop())), ""],
-    ["Proposees par l'analyse",
-     (pol.proposees || []).filter((x) => !installees.has(x)), ""],
-  ];
-  const yEnA = groupes.some(([, l]) => l.length);
-  html += yEnA
-    ? `<table>${groupes.map(([titre, liste, cls]) => liste.length
-        ? `<tr><td style="width:230px" class="faible">${titre}</td><td>${
-            liste.map((f) => `<span class="tag ${cls}">${echapper(f)}</span>`).join(" ")
-          }</td></tr>` : "").join("")}</table>`
-    : `<p class="vide">Aucune police. Lance l'etape Polices, ou depose des .ttf dans
-       <code>analyse/polices/</code>.</p>`;
-  html += `<p class="faible" style="margin-top:8px">
-    Les archives sont deja deballees. Installe une police en la copiant dans
-    <code>analyse/polices/</code>.</p></div>`;
+    <h2 class="titre">Polices disponibles — ${duProjet.length + globales.length + babeldoc.length}</h2>
+    <table>
+      <tr><td style="width:210px" class="faible">Projet (analyse/polices/)</td>
+        <td>${duProjet.length ? duProjet.map((f) =>
+          `<span class="tag installe">${echapper(f.nom)}</span>`).join(" ")
+          : '<span class="vide">aucune</span>'}</td></tr>
+      <tr><td class="faible">Global (partage)</td>
+        <td>${globales.length ? globales.map((f) =>
+          `<span class="tag">${echapper(f.nom)}</span>`).join(" ")
+          : '<span class="vide">aucune</span>'}</td></tr>
+      <tr><td class="faible">BabelDOC (par defaut)</td>
+        <td>${babeldoc.map((f) =>
+          `<span class="tag defaut">${echapper(f.nom)}</span>`).join(" ")}</td></tr>
+    </table>
+    <p class="faible" style="margin-top:8px">
+      Depose tes .ttf dans <code>Global/polices/</code> pour les partager
+      entre projets, ou dans <code>analyse/polices/</code> pour ce projet seul.</p>
+  </div>`;
 
   v.innerHTML = html;
   brancherTris(v, "polices", () => vuePolices(v));
+
+  // installer : copie le fichier + remplit la ligne du CSV
+  v.querySelectorAll("[data-inst]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const police = b.dataset.inst;
+      const sel = v.querySelector(`select[data-pol="${CSS.escape(police)}"]`);
+      const fichier = sel?.value;
+      if (!fichier) return notif("Choisis d'abord une police", true);
+      try {
+        const r = await api(`/projets/${nom}/police/installer`, {
+          method: "POST",
+          body: JSON.stringify({ fichier, police_origine: police }) });
+        notif(`${r.installe} installee (depuis ${r.depuis})`);
+        vuePolices(v);
+      } catch (e) { notif(e.message, true); }
+    }));
 
   const sv = v.querySelector("#sv-polices");
   if (sv) sv.addEventListener("click", async () => {
@@ -858,7 +902,7 @@ async function vuePolices(v) {
     try {
       await api(`/projets/${nom}/fichier/polices`, {
         method: "PUT", body: JSON.stringify({ contenu: out.join("\n") + "\n" }) });
-      notif("Enregistre — relance l'etape Polices pour appliquer");
+      notif("Enregistre");
       vuePolices(v);
     } catch (e) { notif(e.message, true); }
   });

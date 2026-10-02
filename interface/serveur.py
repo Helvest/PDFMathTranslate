@@ -357,15 +357,24 @@ EXT_POLICE = (".ttf", ".otf", ".ttc")
 
 
 def _polices(p: Path) -> dict:
-    """Polices disponibles : installees, telechargees, deja proposees.
+    """Toutes les polices disponibles, groupees par provenance.
 
-    On liste TOUT ce qui est utilisable, meme non installe, pour que
-    l'utilisateur puisse choisir dans une liste deroulante.
+    Trois sources : le projet, le global partage, et les polices embarquees
+    par BabelDOC. Le tout forme la liste deroulante des remplacements.
     """
-    installees = []
-    d = p / "analyse" / "polices"
-    if d.is_dir():
-        installees = sorted(f.name for f in d.iterdir() if f.is_file())
+    import catalogue_polices as catalogue
+
+    try:
+        cat = catalogue.charger(p)
+    except Exception as e:  # noqa: BLE001 - l'interface ne doit pas tomber
+        return {
+            "projet": [], "global": [], "babeldoc": [], "toutes": [],
+            "installees": [], "telechargees": [], "proposees": [],
+            "erreur": f"{type(e).__name__}: {e}",
+        }
+
+    def _item(pol: "catalogue.Police") -> dict:
+        return {"nom": pol.nom, "famille": pol.famille, "style": pol.style}
 
     # polices presentes dans les archives deballees de downloads/
     telechargees = []
@@ -373,7 +382,6 @@ def _polices(p: Path) -> dict:
     if dd.is_dir():
         for f in sorted(dd.rglob("*")):
             if f.is_file() and f.suffix.lower() in EXT_POLICE:
-                # chemin relatif a downloads/, pour rester lisible
                 telechargees.append(str(f.relative_to(dd)).replace("\\", "/"))
 
     # ce que le CSV propose deja (colonne 'propose')
@@ -391,11 +399,23 @@ def _polices(p: Path) -> dict:
         except OSError:
             pass
 
+    du_projet = [_item(x) for x in cat.par_source("projet")]
+    globales = [_item(x) for x in cat.par_source("global")]
+    de_babeldoc = [_item(x) for x in cat.par_source("babeldoc")]
+
     return {
-        "installees": installees,
+        "projet": du_projet,
+        "global": globales,
+        "babeldoc": de_babeldoc,
+        "toutes": [x["nom"] for x in du_projet + globales + de_babeldoc],
+        # conserves pour l'affichage des archives
+        "installees": [x["nom"] for x in du_projet],
         "telechargees": telechargees,
         "proposees": proposees,
-        "toutes": sorted(set(installees + proposees + [Path(t).name for t in telechargees])),
+        "mapping": {
+            nom: {"fichier": f, "origine": o, "source": s}
+            for nom, (f, o, s) in cat.mapping.items()
+        },
     }
 
 
@@ -446,6 +466,105 @@ def api_ecrire_options(nom: str, payload: dict):
         json.dumps(opts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return {"ok": True, "options": opts}
+
+
+@app.post("/api/projets/{nom}/police/installer")
+def api_installer_police(nom: str, payload: dict):
+    """Installe une police dans le projet : copie le fichier, remplit le CSV.
+
+    'Installer' = copier le .ttf dans analyse/polices/ du projet. Le fichier
+    peut venir de Global/polices/, du cache de BabelDOC, ou de downloads/.
+    La ligne du CSV est remplie automatiquement (origine=auto).
+    """
+    import csv as _csv
+
+    import catalogue_polices as catalogue
+
+    p = _projet(nom)
+    if not p.is_dir():
+        raise HTTPException(404, "projet introuvable")
+
+    fichier = (payload.get("fichier") or "").strip()
+    origine_nom = (payload.get("police_origine") or "").strip()
+    if not fichier:
+        raise HTTPException(400, "fichier requis")
+
+    # 1. trouver la source
+    src_path, source = catalogue.resoudre(fichier, p)
+    if src_path is None:
+        # peut-etre dans downloads/ du projet
+        dd = p / "downloads"
+        cand = [f for f in dd.rglob(fichier) if f.is_file()] if dd.is_dir() else []
+        if cand:
+            src_path, source = cand[0], "downloads"
+    if src_path is None:
+        raise HTTPException(404, f"police introuvable : {fichier}")
+
+    # 2. copier dans le projet
+    dest_dir = p / "analyse" / "polices"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src_path.name
+    if not dest.exists() or dest.read_bytes() != src_path.read_bytes():
+        shutil.copy2(src_path, dest)
+
+    # 3. remplir la ligne du CSV si une police d'origine est donnee
+    if origine_nom:
+        csv_path = p / "analyse" / "polices.csv"
+        entete = ["police_origine", "remplacement", "origine", "propose",
+                  "raison", "famille", "spans", "pages", "pdfs"]
+        lignes: list[dict] = []
+        if csv_path.is_file():
+            with csv_path.open(encoding="utf-8-sig", newline="") as f:
+                lignes = list(_csv.DictReader(f))
+
+        trouve = False
+        for l in lignes:
+            if (l.get("police_origine") or "").strip() == origine_nom:
+                l["remplacement"] = dest.name
+                l["origine"] = "auto"
+                trouve = True
+                break
+        if not trouve:
+            lignes.append({
+                "police_origine": origine_nom, "remplacement": dest.name,
+                "origine": "auto", "propose": "", "raison": "",
+                "famille": "", "spans": "", "pages": "", "pdfs": "",
+            })
+
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=entete)
+            w.writeheader()
+            for l in lignes:
+                w.writerow({k: l.get(k, "") for k in entete})
+
+    return {
+        "ok": True,
+        "installe": dest.name,
+        "depuis": source,
+        "chemin": str(dest),
+    }
+
+
+@app.get("/api/polices/global")
+def api_polices_global():
+    """Le catalogue global, toutes sources confondues (hors projet)."""
+    import catalogue_polices as catalogue
+
+    cat = catalogue.charger(None)
+    return {
+        "global": [
+            {"nom": x.nom, "famille": x.famille, "style": x.style}
+            for x in cat.par_source("global")
+        ],
+        "babeldoc": [
+            {"nom": x.nom, "famille": x.famille, "style": x.style}
+            for x in cat.par_source("babeldoc")
+        ],
+        "dossier": str(catalogue.POLICES_GLOBALES),
+        "csv": str(catalogue.CSV_GLOBAL),
+        "mapping": {n: {"fichier": f, "origine": o} for n, (f, o, _s) in cat.mapping.items()},
+    }
 
 
 @app.get("/api/projets/{nom}/contexte/{cle}")
