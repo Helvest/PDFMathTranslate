@@ -579,6 +579,16 @@ IMPORTANT :
 CTX_EMPTY = "(page sans contenu textuel exploitable)"
 
 
+def prog(fait: int, total: int, libelle: str = "") -> None:
+    """Emet une ligne de progression lisible par l'interface.
+
+    Convention : [PROGRESS] fait/total  libelle
+    Le serveur la lit dans le log pour animer la barre. Inoffensive en ligne
+    de commande : c'est une ligne de plus dans la sortie.
+    """
+    print(f"[PROGRESS] {fait}/{total}" + (f"  {libelle}" if libelle else ""), flush=True)
+
+
 def _lire_ligne(raw: str, prefixe: str) -> str:
     """Extrait 'PREFIXE: valeur' d'une reponse LLM. '' si absent ou RIEN."""
     for line in raw.splitlines():
@@ -616,6 +626,10 @@ def step_context(pdfs: list[Path], work: Path, ctx_path: Path) -> str:
     lot_lines: list[str] = []
     docs: list[dict] = []  # [{"nom":..., "doc_lines":[...], "pages":[(n, resume)]}]
 
+    # total de pages, tous documents confondus : sert a la barre de progression
+    total_pages = sum(len(pdf_pages(p)) for p in pdfs)
+    fait = 0
+
     for pdf in pdfs:
         pages = pdf_pages(pdf)
         doc_lines: list[str] = []
@@ -623,6 +637,8 @@ def step_context(pdfs: list[Path], work: Path, ctx_path: Path) -> str:
         print(f"  {pdf.name}: {len(pages)} pages")
 
         for n, txt in enumerate(pages, 1):
+            fait += 1
+            prog(fait, total_pages, f"{pdf.name} p{n}")
             if len(txt) < MIN_PAGE_CHARS:
                 pages_resume.append((n, CTX_EMPTY))
                 continue
@@ -745,10 +761,14 @@ def step_glossary(
 
     origin: dict[str, set] = {}
     found: dict[str, str] = {}
+    total_pages = sum(len(pdf_pages(p)) for p in pdfs)
+    fait = 0
     for pdf in pdfs:
         pages = pdf_pages(pdf)
         # contexte par page : lu depuis contexte.md si dispo
         for n, txt in enumerate(pages, 1):
+            fait += 1
+            prog(fait, total_pages, f"{pdf.name} p{n}")
             if len(txt) < MIN_PAGE_CHARS:
                 continue
             page_ctx = f"{pdf.name} page {n}"
