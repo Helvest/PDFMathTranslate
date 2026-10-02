@@ -542,6 +542,10 @@ def _resumer_pdfs(noms) -> str:
 
 CTX_PAGE_PROMPT = """Tu analyses un document pour preparer sa traduction.
 
+=== CONSIGNES DE L'UTILISATEUR ===
+{consignes}
+=== FIN DES CONSIGNES ===
+
 Contexte du LOT (tous les documents) :
 {lot_ctx}
 
@@ -567,6 +571,9 @@ IMPORTANT :
 - Ne repete pas ce qui est deja dans les contextes ci-dessus. Une ligne de
   LOT ou DOC ne doit etre ajoutee que si elle apporte un fait nouveau, pas
   une reformulation de ce qui precede.
+- Les consignes de l'utilisateur priment : s'il a donne une traduction
+  officielle pour un terme, utilise-la. S'il a explique l'univers, appuie-toi
+  dessus au lieu de le re-deduire.
 """
 
 CTX_EMPTY = "(page sans contenu textuel exploitable)"
@@ -600,6 +607,12 @@ def step_context(pdfs: list[Path], work: Path, ctx_path: Path) -> str:
         print("  contexte.md deja present -> reutilise tel quel (supprimer pour refaire)")
         return ctx_path.read_text(encoding="utf-8")
 
+    # consignes de l'utilisateur : ce qu'il sait deja, ses sources, sa
+    # terminologie. Le LLM s'appuie dessus au lieu de tout re-deduire.
+    consignes = _lire_consignes(work / "consignes-contexte.md")
+    if consignes:
+        print("  consignes-contexte.md lu")
+
     lot_lines: list[str] = []
     docs: list[dict] = []  # [{"nom":..., "doc_lines":[...], "pages":[(n, resume)]}]
 
@@ -616,6 +629,7 @@ def step_context(pdfs: list[Path], work: Path, ctx_path: Path) -> str:
 
             raw = llm(
                 CTX_PAGE_PROMPT.format(
+                    consignes=consignes[:6000] or "(aucune consigne fournie)",
                     lot_ctx="\n".join(lot_lines) or "(aucun pour l'instant)",
                     doc_ctx="\n".join(doc_lines) or "(aucun pour l'instant)",
                     page=n,
