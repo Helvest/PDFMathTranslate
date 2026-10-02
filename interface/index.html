@@ -529,11 +529,19 @@ function dessinerEtapes() {
 // Le bouton "etape suivante" : dit ce qu'il va lancer, puis demande confirmation.
 function boutonSuivant() {
   const v = S.suivant || {};
-  const nom = v.libelle || "Suivante";
+  const nom = v.libelle || "";
+  if (!v.suivante) {
+    // aucune étape proposable : on explique pourquoi, plutôt qu'un bouton mort
+    return `<button class="etape tout" data-suivant disabled
+      title="${echapper(v.raison || "Toutes les etapes sont faites")}">
+      <span class="ic">⊘</span>
+      <span class="nom">${echapper(v.etat_global === "vide" ? "Aucun PDF" : "Terminé")}</span>
+      <span class="det">${echapper(v.raison ? "" : "rien à lancer")}</span></button>`;
+  }
   return `<button class="etape tout" data-suivant
-    title="${echapper(v.suivante ? "Lancer l'etape : " + nom : "Toutes les etapes sont faites")}">
-    <span class="ic">${v.suivante ? "▶" : "✓"}</span>
-    <span class="nom">${echapper(v.suivante ? nom : "Termine")}</span>
+    title="Lancer l'etape : ${echapper(nom)}">
+    <span class="ic">▶</span>
+    <span class="nom">${echapper(nom)}</span>
     <span class="det">suivante</span></button>`;
 }
 

@@ -96,6 +96,60 @@ CONFLITS = {
 
 ETAPES = ("contexte", "polices", "glossaire", "traduire")
 
+# "tout" enchaine les 4 etapes dans l'ordre, en un seul processus.
+ETAPES_TOUT = ("contexte", "polices", "glossaire", "traduire")
+
+RE_PROGRESS = re.compile(r"^\[PROGRESS\]\s+(\d+)/(\d+)\s*(.*)$")
+
+# Etat du bench : global, un seul a la fois.
+BENCH: dict = {"etat": "pret", "log": "", "debut": None, "erreur": ""}
+
+
+# ---------------------------------------------------------------- securite
+
+def _projet(nom: str) -> Path:
+    """Chemin d'un projet, en refusant toute sortie de Projets/."""
+    if not re.fullmatch(r"[A-Za-z0-9 _-]{1,64}", nom):
+        raise HTTPException(400, "nom de projet invalide")
+    p = (PROJETS / nom).resolve()
+    if PROJETS.resolve() not in p.parents and p != PROJETS.resolve():
+        raise HTTPException(400, "chemin hors de Projets/")
+    return p
+
+
+def _fichier(projet: Path, chemin: str) -> Path:
+    """Chemin d'un fichier dans un projet, en refusant les remontees."""
+    p = (projet / chemin).resolve()
+    if projet.resolve() not in p.parents:
+        raise HTTPException(400, "chemin hors du projet")
+    return p
+
+
+def _liste_projets() -> list[dict]:
+    if not PROJETS.is_dir():
+        return []
+    out = []
+    for d in sorted(PROJETS.iterdir()):
+        # .corbeille et .downloads sont des dossiers techniques, pas des projets
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        meta = d / "projet.json"
+        infos = {"nom": d.name}
+        if meta.is_file():
+            try:
+                infos.update(json.loads(meta.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                pass
+        infos["nom"] = d.name  # le dossier fait foi
+        src = d / "source"
+        infos["pdfs"] = len(list(src.glob("*.pdf"))) if src.is_dir() else 0
+        infos["etapes"] = _etat_projet(d.name)
+        out.append(infos)
+    return out
+
+
+# ---------------------------------------------------------------- etapes
+
 def _etat_projet(nom: str) -> dict:
     """Etat des 4 etapes, avec les blocages calcules."""
     with VERROU:
@@ -170,7 +224,8 @@ def _options(projet: str) -> dict:
 def _demarrer(projet: str, etape: str) -> subprocess.Popen:
     """Construit la commande et lance le processus, SANS le suivre.
 
-    Separe de _lancer : on peut ainsi lancer sans suivre, si besoin.
+    Separe de _lancer pour que l'enchainement "tout" puisse attendre la fin
+    de chaque etape avant de lancer la suivante.
     """
     dossier = PROJETS / projet
     log_path = dossier / "analyse" / f"{etape}.log"
@@ -229,19 +284,32 @@ def _lancer(projet: str, etape: str) -> None:
     threading.Thread(target=_suivre, args=(projet, etape, proc), daemon=True).start()
 
 
-def _corbeille(chemin: Path) -> None:
-    """Envoie un fichier a la corbeille. Jamais de suppression definitive.
+def _corbeille(chemin: Path) -> dict:
+    """Envoie un fichier ou un dossier a la corbeille. Jamais de suppression.
 
-    send2trash si disponible, sinon repli sur un dossier .corbeille horodate.
+    Deux mecanismes : la corbeille Windows (send2trash), puis un repli dans
+    Projets/.corbeille/. On bascule sur le repli des que send2trash echoue,
+    pour n'importe quelle raison — module absent, permission, volume non
+    supporte. Sans ce repli, un echec laissait le fichier sur place sans rien
+    dire.
+
+    Retourne {"methode": ..., "destination": ...} pour l'afficher.
     """
     try:
         from send2trash import send2trash  # type: ignore
 
         send2trash(str(chemin))
+        return {"methode": "corbeille Windows", "destination": ""}
     except ImportError:
-        cible = PROJETS / ".corbeille" / f"{chemin.name}-{int(time.time())}"
-        cible.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(chemin), str(cible))
+        pass
+    except Exception as e:  # noqa: BLE001 - on bascule toujours sur le repli
+        print(f"send2trash a echoue ({type(e).__name__}: {e}) -> repli local")
+
+    horodatage = datetime.now().strftime("%Y%m%d-%H%M%S")
+    repli = PROJETS / ".corbeille" / f"{horodatage}-{chemin.name}"
+    repli.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(chemin), str(repli))
+    return {"methode": "repli local", "destination": str(repli)}
 
 
 # ---------------------------------------------------------------- API
@@ -682,16 +750,23 @@ def api_etape_suivante(nom: str):
         ("traduire", "Traduire", lambda: any((p / "traduits").glob("*.pdf"))),
     ]
 
-    # la premiere etape non faite
+    # Sans PDF, aucune étape n'a de sens : proposer "Contexte" sur un projet
+    # vide ne ferait qu'échouer aussitôt.
+    srcs = sorted(x.name for x in (p / "source").glob("*.pdf")) if (p / "source").is_dir() else []
+    deja_traduits = (
+        bool(list((p / "traduits").glob("*.pdf"))) if (p / "traduits").is_dir() else False
+    )
+
+    # la première étape non faite
     suivante = None
-    for cle, libelle, fait in ordre:
-        if not fait():
-            suivante = (cle, libelle)
-            break
+    if srcs or deja_traduits:
+        for cle, libelle, fait in ordre:
+            if not fait():
+                suivante = (cle, libelle)
+                break
 
     # --- ce qui manque, et ce qui est deja fait
     analyse = p / "analyse"
-    srcs = sorted(x.name for x in (p / "source").glob("*.pdf")) if (p / "source").is_dir() else []
     o = _options(nom)
 
     # glossaire : compte les termes et les pieges source == cible
@@ -735,11 +810,21 @@ def api_etape_suivante(nom: str):
     if ctx.is_dir():
         n_contextes = len([f for f in ctx.glob("*.json") if not f.name.startswith("_")])
 
+    if not srcs:
+        raison = "Depose des PDF dans source/ pour commencer"
+    elif not suivante:
+        raison = "Toutes les etapes sont faites"
+    else:
+        raison = ""
+
     return {
         "suivante": suivante[0] if suivante else None,
         "libelle": suivante[1] if suivante else "",
+        "raison": raison,
         "etats": etats,
-        "etat_global": "termine" if not suivante else "en_cours",
+        "etat_global": (
+                "vide" if not srcs else ("termine" if not suivante else "en_cours")
+            ),
         "resume": {
             "pdfs_source": len(srcs),
             "pdfs_selectionnes": len(o.get("pdfs_analyser") or []),
@@ -756,7 +841,7 @@ def api_etape_suivante(nom: str):
 
 @app.post("/api/projets/{nom}/etape/{etape}")
 def api_lancer_etape(nom: str, etape: str):
-    if etape not in ETAPES:
+    if etape not in ETAPES and etape != "tout":
         raise HTTPException(400, f"etape inconnue : {etape}")
     p = _projet(nom)
     if not p.is_dir():
@@ -778,6 +863,36 @@ def api_lancer_etape(nom: str, etape: str):
             "log": "",
             "debut": datetime.now().isoformat(timespec="seconds"),
         }
+
+    if etape == "tout":
+        # on enchaine dans un seul fil : chaque etape attend la precedente
+        etats["tout"] = {
+            "etat": "en_cours",
+            "fait": 0,
+            "total": 0,
+            "log": "",
+            "debut": datetime.now().isoformat(timespec="seconds"),
+        }
+
+        def enchainer() -> None:
+            for e in ETAPES_TOUT:
+                with VERROU:
+                    etats[e] = {
+                        "etat": "en_cours", "fait": 0, "total": 0,
+                        "log": "", "debut": datetime.now().isoformat(timespec="seconds"),
+                    }
+                proc = _demarrer(nom, e)
+                _suivre(nom, e, proc)
+                with VERROU:
+                    if etats[e].get("etat") == "erreur":
+                        etats["tout"]["etat"] = "erreur"
+                        etats["tout"]["erreur"] = f"{e} a echoue"
+                        return
+            with VERROU:
+                etats["tout"]["etat"] = "termine"
+
+        threading.Thread(target=enchainer, daemon=True).start()
+        return {"ok": True, "etape": "tout"}
 
     _lancer(nom, etape)
     return {"ok": True, "etape": etape}
