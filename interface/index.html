@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Traduction PDF</title>
+<style>
+  :root {
+    --fond: var(--background, #1a1a1a);
+    --carte: var(--card, #222);
+    --bord: var(--border, #333);
+    --texte: var(--foreground, #e8e8e8);
+    --faible: var(--muted-foreground, #888);
+    --accent: var(--accent, #6ea8fe);
+    --ok: #4ade80;
+    --attention: #fbbf24;
+    --erreur: #f87171;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--fond);
+    color: var(--texte);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 13px;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  button, input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; }
+  button { cursor: pointer; }
+
+  /* ---------------- barre haute : titre + etapes ---------------- */
+  .haut {
+    display: flex; align-items: center; gap: 14px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--bord);
+    background: var(--carte);
+    flex: 0 0 auto;
+  }
+  .marque { font-weight: 600; letter-spacing: -0.01em; }
+  .marque small { color: var(--faible); font-weight: 400; margin-left: 6px; }
+
+  .etapes { display: flex; gap: 6px; flex: 1; min-width: 0; }
+  .etape {
+    flex: 1 1 0; min-width: 0;
+    display: flex; align-items: center; gap: 8px;
+    border: 1px solid var(--bord);
+    border-radius: 7px;
+    background: transparent;
+    padding: 5px 10px;
+    text-align: left;
+    position: relative;
+    overflow: hidden;
+    transition: border-color .15s;
+  }
+  .etape:hover:not(:disabled) { border-color: var(--accent); }
+  .etape:disabled { cursor: not-allowed; opacity: .5; }
+  .etape .ic { flex: 0 0 auto; color: var(--accent); }
+  .etape .nom { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .etape .det { color: var(--faible); font-size: 11px; white-space: nowrap; }
+
+  /* barre de progression en fond du bouton */
+  .etape .barre {
+    position: absolute; inset: 0 auto 0 0;
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    width: 0; transition: width .3s;
+    pointer-events: none;
+  }
+  .etape.en_cours { border-color: var(--accent); }
+  .etape.en_cours .ic { animation: tourne 1.2s linear infinite; }
+  @keyframes tourne { to { transform: rotate(360deg); } }
+  .etape.termine .ic { color: var(--ok); }
+  .etape.erreur { border-color: var(--erreur); }
+  .etape.erreur .ic { color: var(--erreur); }
+  .etape.bloque { opacity: .45; }
+
+  .pilule {
+    border: 1px solid var(--bord); border-radius: 5px;
+    padding: 2px 8px; font-size: 11px; color: var(--faible);
+    white-space: nowrap;
+  }
+  .pilule.ok { border-color: var(--ok); color: var(--ok); }
+  .pilule.ko { border-color: var(--erreur); color: var(--erreur); }
+
+  /* ---------------- corps ---------------- */
+  .corps { flex: 1; display: flex; min-height: 0; }
+
+  /* zone centrale */
+  .centre { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .onglets {
+    display: flex; gap: 2px; padding: 0 12px;
+    border-bottom: 1px solid var(--bord);
+    flex: 0 0 auto; overflow-x: auto;
+  }
+  .onglet {
+    padding: 8px 12px; background: none; border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--faible); white-space: nowrap;
+  }
+  .onglet:hover { color: var(--texte); }
+  .onglet.on { color: var(--texte); border-bottom-color: var(--accent); font-weight: 600; }
+  .vue { flex: 1; overflow: auto; padding: 14px 16px; min-height: 0; }
+
+  /* panneau projets (droite, repliable) */
+  .projets {
+    flex: 0 0 210px;
+    border-left: 1px solid var(--bord);
+    background: var(--carte);
+    display: flex; flex-direction: column;
+    transition: flex-basis .18s;
+    min-width: 0;
+  }
+  .projets.replie { flex-basis: 34px; }
+  .projets.replie .ptete-texte,
+  .projets.replie .pliste,
+  .projets.replie .pied { display: none; }
+  .ptete {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 10px; border-bottom: 1px solid var(--bord);
+  }
+  .ptete-texte { flex: 1; font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .07em; color: var(--faible); }
+  .bascule {
+    background: none; border: 1px solid var(--bord); border-radius: 5px;
+    width: 22px; height: 22px; display: flex; align-items: center;
+    justify-content: center; color: var(--faible); flex: 0 0 auto;
+  }
+  .bascule:hover { color: var(--texte); border-color: var(--accent); }
+  .pliste { flex: 1; overflow: auto; padding: 6px; }
+  .pitem {
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 9px; border-radius: 6px; margin-bottom: 2px;
+    background: none; border: none; width: 100%; text-align: left;
+  }
+  .pitem:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .pitem.on { background: color-mix(in srgb, var(--accent) 22%, transparent); font-weight: 600; }
+  .pitem .pt { width: 6px; height: 6px; border-radius: 50%; background: var(--faible); flex: 0 0 6px; }
+  .pitem.on .pt { background: var(--accent); }
+  .pitem .pn { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pitem .pc { font-size: 10.5px; color: var(--faible); }
+  .pied { padding: 8px 10px; border-top: 1px solid var(--bord); }
+
+  /* ---------------- elements communs ---------------- */
+  .btn {
+    background: none; border: 1px solid var(--bord); border-radius: 6px;
+    padding: 5px 10px; color: var(--texte);
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.plein { width: 100%; text-align: center; }
+  .btn.acc { border-color: var(--accent); color: var(--accent); }
+  .btn.mini { padding: 2px 7px; font-size: 11px; }
+
+  h2.titre {
+    font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--faible);
+    margin: 0 0 7px 0;
+  }
+  .bloc { margin-bottom: 18px; }
+  .vide { color: var(--faible); font-style: italic; }
+
+  textarea {
+    width: 100%; background: transparent; border: 1px solid var(--bord);
+    border-radius: 7px; padding: 9px 11px; resize: vertical;
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+    line-height: 1.5; min-height: 120px;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  input[type=text] {
+    background: transparent; border: 1px solid var(--bord);
+    border-radius: 6px; padding: 5px 9px;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th {
+    text-align: left; font-weight: 600; color: var(--faible);
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
+    padding: 5px 8px; border-bottom: 1px solid var(--bord);
+  }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--bord); }
+  tr:last-child td { border-bottom: none; }
+  .faible { color: var(--faible); }
+
+  .tag {
+    display: inline-block; border: 1px solid var(--bord); border-radius: 4px;
+    padding: 0 5px; font-size: 10.5px;
+  }
+  .tag.auto { border-color: var(--accent); color: var(--accent); }
+  .tag.manuel { border-color: var(--texte); }
+  .tag.defaut { color: var(--faible); border-style: dashed; }
+
+  /* log */
+  .log {
+    border: 1px solid var(--bord); border-radius: 7px;
+    padding: 9px 11px; font-family: ui-monospace, Consolas, monospace;
+    font-size: 11px; line-height: 1.5; white-space: pre-wrap;
+    color: var(--faible); max-height: 260px; overflow: auto;
+    background: color-mix(in srgb, var(--fond) 60%, transparent);
+  }
+  .log b { color: var(--texte); font-weight: 600; }
+
+  .barre-prog {
+    height: 4px; background: var(--bord); border-radius: 2px; overflow: hidden;
+    margin: 8px 0 4px;
+  }
+  .barre-prog > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+
+  .notif {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: var(--carte); border: 1px solid var(--bord);
+    border-radius: 7px; padding: 8px 14px; font-size: 12px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.35); z-index: 50;
+    opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  .notif.on { opacity: 1; }
+  .notif.erreur { border-color: var(--erreur); color: var(--erreur); }
+
+  .modal-fond {
+    position: fixed; inset: 0; background: rgba(0,0,0,.5);
+    display: flex; align-items: center; justify-content: center; z-index: 60;
+  }
+  .modal {
+    background: var(--carte); border: 1px solid var(--bord);
+    border-radius: 10px; padding: 18px; width: 340px;
+  }
+  .modal h3 { margin: 0 0 12px; font-size: 14px; }
+  .modal .rangee { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+  .cache { display: none !important; }
+</style>
+</head>
+<body>
+
+<!-- ============ barre haute ============ -->
+<div class="haut">
+  <div class="marque">Traduction PDF<small id="projet-titre"></small></div>
+  <div class="etapes" id="etapes"></div>
+  <span class="pilule" id="pilule-proxy">proxy ?</span>
+</div>
+
+<!-- ============ corps ============ -->
+<div class="corps">
+
+  <!-- central -->
+  <div class="centre">
+    <div class="onglets" id="onglets">
+      <button class="onglet on" data-vue="config">Config</button>
+      <button class="onglet" data-vue="contexte">Contexte</button>
+      <button class="onglet" data-vue="polices">Polices</button>
+      <button class="onglet" data-vue="glossaire">Glossaire</button>
+      <button class="onglet" data-vue="pdfs">PDFs</button>
+      <button class="onglet" data-vue="log">Log</button>
+    </div>
+    <div class="vue" id="vue"></div>
+  </div>
+
+  <!-- projets, repliable -->
+  <aside class="projets" id="panneau-projets">
+    <div class="ptete">
+      <span class="ptete-texte">Projets</span>
+      <button class="bascule" id="bascule" title="Replier / deplier">›</button>
+    </div>
+    <div class="pliste" id="pliste"></div>
+    <div class="pied">
+      <button class="btn plein acc" id="btn-creer">+ Creer un projet</button>
+    </div>
+  </aside>
+
+</div>
+
+<div class="notif" id="notif"></div>
+
+<!-- modal creation -->
+<div class="modal-fond cache" id="modal">
+  <div class="modal">
+    <h3>Nouveau projet</h3>
+    <input type="text" id="nom-projet" placeholder="Nom du projet" style="width:100%">
+    <div class="rangee">
+      <button class="btn" id="modal-annuler">Annuler</button>
+      <button class="btn acc" id="modal-creer">Creer</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- etat
+
+const S = {
+  projets: [],
+  actif: null,          // nom du projet courant
+  projet: null,         // detail du projet courant
+  vue: "config",
+  etapes: {},           // etat des etapes du projet courant
+  poll: null,           // timer de rafraichissement
+  replie: false,
+};
+
+const ICONES = {
+  pret: "▶", en_cours: "◐", termine: "✓", erreur: "✕", bloque: "⊘",
+};
+const ORDRE_ETAPES = ["contexte", "polices", "glossaire", "traduire"];
+const LIBELLES = {
+  contexte: "Contexte", polices: "Polices",
+  glossaire: "Glossaire", traduire: "Traduire",
+};
+
+// ---------------------------------------------------------------- utils
+
+const $ = (s) => document.querySelector(s);
+
+function notif(message, erreur = false) {
+  const n = $("#notif");
+  n.textContent = message;
+  n.className = "notif on" + (erreur ? " erreur" : "");
+  clearTimeout(n._t);
+  n._t = setTimeout(() => (n.className = "notif"), 2600);
+}
+
+async function api(chemin, options = {}) {
+  const r = await fetch("/api" + chemin, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).detail || msg; } catch (e) { /* ignore */ }
+    throw new Error(msg);
+  }
+  return r.status === 204 ? null : r.json();
+}
+
+function echapper(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function taille(o) {
+  if (o < 1024) return o + " o";
+  if (o < 1048576) return (o / 1024).toFixed(0) + " Ko";
+  return (o / 1048576).toFixed(1) + " Mo";
+}
+
+// ---------------------------------------------------------------- projets
+
+async function chargerProjets() {
+  const d = await api("/projets");
+  S.projets = d.projets || [];
+
+  // premier projet par defaut, ou celui deja actif s'il existe encore
+  if (!S.actif || !S.projets.some((p) => p.nom === S.actif)) {
+    S.actif = S.projets.length ? S.projets[0].nom : null;
+  }
+  dessinerProjets();
+  if (S.actif) await chargerProjet(S.actif);
+  else { S.projet = null; S.etapes = {}; dessinerEtapes(); dessinerVue(); }
+}
+
+function dessinerProjets() {
+  const l = $("#pliste");
+  if (!S.projets.length) {
+    l.innerHTML = '<p class="vide" style="padding:8px">Aucun projet</p>';
+    return;
+  }
+  l.innerHTML = S.projets.map((p) => `
+    <button class="pitem ${p.nom === S.actif ? "on" : ""}" data-projet="${echapper(p.nom)}">
+      <span class="pt"></span>
+      <span class="pn">${echapper(p.nom)}</span>
+      <span class="pc">${p.pdfs}</span>
+    </button>`).join("");
+  l.querySelectorAll("[data-projet]").forEach((b) =>
+    b.addEventListener("click", () => chargerProjet(b.dataset.projet)));
+}
+
+async function chargerProjet(nom) {
+  S.actif = nom;
+  S.projet = await api("/projets/" + encodeURIComponent(nom));
+  S.etapes = S.projet.etapes || {};
+  $("#projet-titre").textContent = nom ? "· " + nom : "";
+  dessinerProjets();
+  dessinerEtapes();
+  dessinerVue();
+  demarrerPoll();
+}
+
+// ---------------------------------------------------------------- etapes
+
+function dessinerEtapes() {
+  const zone = $("#etapes");
+  if (!S.actif) {
+    zone.innerHTML = '<span class="faible" style="padding:6px 2px">Selectionne ou cree un projet</span>';
+    return;
+  }
+  zone.innerHTML = ORDRE_ETAPES.map((e) => {
+    const v = S.etapes[e] || { etat: "pret", fait: 0, total: 0 };
+    const pct = v.total ? Math.round((v.fait / v.total) * 100) : 0;
+    const det =
+      v.etat === "en_cours" ? (v.total ? `${v.fait}/${v.total}` : "demarrage…")
+      : v.etat === "termine" ? "termine"
+      : v.etat === "erreur" ? "erreur"
+      : v.etat === "bloque" ? (v.raison || "bloque")
+      : "";
+    const desactive = v.etat === "en_cours" || v.etat === "bloque" ? "disabled" : "";
+    return `
+      <button class="etape ${v.etat}" data-etape="${e}" ${desactive}
+              title="${echapper(v.raison || v.erreur || LIBELLES[e])}">
+        <span class="barre" style="width:${pct}%"></span>
+        <span class="ic">${ICONES[v.etat] || "▶"}</span>
+        <span class="nom">${LIBELLES[e]}</span>
+        <span class="det">${echapper(det)}</span>
+      </button>`;
+  }).join("");
+
+  zone.querySelectorAll("[data-etape]").forEach((b) =>
+    b.addEventListener("click", () => lancerEtape(b.dataset.etape)));
+}
+
+async function lancerEtape(etape) {
+  try {
+    await api(`/projets/${encodeURIComponent(S.actif)}/etape/${etape}`, { method: "POST" });
+    notif(LIBELLES[etape] + " lance");
+    S.etapes[etape] = { etat: "en_cours", fait: 0, total: 0 };
+    dessinerEtapes();
+    demarrerPoll();
+  } catch (e) {
+    notif(e.message, true);
+  }
+}
+
+function demarrerPoll() {
+  clearInterval(S.poll);
+  S.poll = setInterval(async () => {
+    if (!S.actif) return;
+    try {
+      const d = await api("/projets/" + encodeURIComponent(S.actif));
+      const avant = JSON.stringify(S.etapes);
+      S.etapes = d.etapes || {};
+      S.projet = d;
+      if (JSON.stringify(S.etapes) !== avant) dessinerEtapes();
+      // le log se rafraichit tant qu'une etape tourne
+      const actif = ORDRE_ETAPES.find((e) => S.etapes[e]?.etat === "en_cours");
+      if (actif && S.vue === "log") rafraichirLog(actif);
+      if (S.vue === "polices" || S.vue === "pdfs") {
+        // ces vues dependent de fichiers produits par les etapes
+        if (JSON.stringify(S.etapes) !== avant) dessinerVue();
+      }
+    } catch (e) { /* le serveur a peut-etre redemarre */ }
+  }, 1500);
+}
+
+// ---------------------------------------------------------------- vues
+
+function dessinerVue() {
+  const v = $("#vue");
+  if (!S.actif) {
+    v.innerHTML = '<p class="vide">Aucun projet. Cree-en un avec le bouton en bas a droite.</p>';
+    return;
+  }
+  const f = {
+    config: vueConfig, contexte: vueContexte, polices: vuePolices,
+    glossaire: vueGlossaire, pdfs: vuePdfs, log: vueLog,
+  }[S.vue];
+  f(v);
+}
+
+// --- config ---
+async function vueConfig(v) {
+  v.innerHTML = `
+    <div class="bloc">
+      <h2 class="titre">Consignes pour le contexte</h2>
+      <p class="faible" style="margin:0 0 7px">
+        Ce que tu sais deja : univers, sources, terminologie imposee.
+        Lu par le LLM pour le contexte ET le glossaire.</p>
+      <textarea id="ta-ctx"></textarea>
+      <div style="margin-top:7px"><button class="btn acc" id="sv-ctx">Enregistrer</button></div>
+    </div>
+    <div class="bloc">
+      <h2 class="titre">Consignes pour les polices</h2>
+      <p class="faible" style="margin:0 0 7px">
+        Sites prioritaires, polices imposees, polices a ecarter.
+        Lu par le LLM avant la recherche automatique.</p>
+      <textarea id="ta-pol"></textarea>
+      <div style="margin-top:7px"><button class="btn acc" id="sv-pol">Enregistrer</button></div>
+    </div>`;
+
+  for (const [cle, ta, btn] of [
+    ["consignes-contexte", "#ta-ctx", "#sv-ctx"],
+    ["consignes-polices", "#ta-pol", "#sv-pol"],
+  ]) {
+    try {
+      const d = await api(`/projets/${encodeURIComponent(S.actif)}/fichier/${cle}`);
+      v.querySelector(ta).value = d.contenu || "";
+    } catch (e) { v.querySelector(ta).value = "(erreur de lecture)"; }
+    v.querySelector(btn).addEventListener("click", async () => {
+      try {
+        await api(`/projets/${encodeURIComponent(S.actif)}/fichier/${cle}`, {
+          method: "PUT",
+          body: JSON.stringify({ contenu: v.querySelector(ta).value }),
+        });
+        notif("Enregistre");
+      } catch (e) { notif(e.message, true); }
+    });
+  }
+}
+
+// --- contexte ---
+async function vueContexte(v) {
+  let d;
+  try { d = await api(`/projets/${encodeURIComponent(S.actif)}/fichier/contexte`); }
+  catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
+
+  if (!d.existe || !d.contenu.trim()) {
+    v.innerHTML = `<p class="vide">Pas encore de contexte.
+      Lance l'etape Contexte en haut.</p>`;
+    return;
+  }
+  v.innerHTML = `
+    <div class="bloc">
+      <h2 class="titre">Contexte du projet — 3 niveaux</h2>
+      <p class="faible" style="margin:0 0 7px">
+        Lot (tous les documents) · par document · par page. Editable.</p>
+      <textarea id="ta-contexte" style="min-height:420px"></textarea>
+      <div style="margin-top:7px"><button class="btn acc" id="sv-contexte">Enregistrer</button></div>
+    </div>`;
+  const ta = v.querySelector("#ta-contexte");
+  ta.value = d.contenu;
+  v.querySelector("#sv-contexte").addEventListener("click", async () => {
+    try {
+      await api(`/projets/${encodeURIComponent(S.actif)}/fichier/contexte`, {
+        method: "PUT", body: JSON.stringify({ contenu: ta.value }),
+      });
+      notif("Enregistre");
+    } catch (e) { notif(e.message, true); }
+  });
+}
+
+// --- polices ---
+async function vuePolices(v) {
+  const nom = encodeURIComponent(S.actif);
+  const [csv, det] = await Promise.all([
+    api(`/projets/${nom}/fichier/polices`).catch(() => ({ contenu: "" })),
+    api(`/projets/${nom}`),
+  ]);
+
+  const lignes = csvLignes(csv.contenu);
+  const installees = det.polices_installees || [];
+  const downloads = det.downloads || [];
+
+  let html = "";
+
+  html += `<div class="bloc">
+    <h2 class="titre">Detectees dans les PDFs — ${lignes.length}</h2>`;
+  if (!lignes.length) {
+    html += `<p class="vide">Lance l'etape Polices pour detecter.</p>`;
+  } else {
+    html += `<table><tr><th>Police</th><th>Remplacée par</th><th>Origine</th>
+             <th>Raison</th></tr>`;
+    for (const l of lignes) {
+      const opts = ['<option value="">— aucune —</option>']
+        .concat(installees.map((f) =>
+          `<option value="${echapper(f)}" ${f === l.remplacement ? "selected" : ""}>${echapper(f)}</option>`))
+        .join("");
+      html += `<tr>
+        <td>${echapper(l.police_origine)}</td>
+        <td><select data-pol="${echapper(l.police_origine)}" style="max-width:220px">${opts}</select></td>
+        <td><span class="tag ${echapper(l.origine || "defaut")}">${echapper(l.origine || "defaut")}</span></td>
+        <td class="faible">${echapper(l.raison || "")}</td>
+      </tr>`;
+    }
+    html += `</table>
+      <div style="margin-top:7px"><button class="btn acc" id="sv-polices">Enregistrer</button></div>`;
+  }
+  html += `</div>`;
+
+  html += `<div class="bloc">
+    <h2 class="titre">Telechargements — ${downloads.length}</h2>`;
+  if (!downloads.length) {
+    html += `<p class="vide">Aucune archive. Lance l'etape Polices.</p>`;
+  } else {
+    html += `<table><tr><th>Archive</th><th>Taille</th></tr>` +
+      downloads.map((f) => `<tr><td>${echapper(f.nom)}</td>
+        <td class="faible">${taille(f.taille)}</td></tr>`).join("") + `</table>`;
+  }
+  html += `</div>`;
+
+  html += `<div class="bloc">
+    <h2 class="titre">Installees — ${installees.length}</h2>
+    <p class="faible">${installees.length ? installees.map(echapper).join(" · ") : "(aucune)"}</p>
+    <p class="faible">Depose tes .ttf dans
+      <code>Projets/${echapper(S.actif)}/analyse/polices/</code></p>
+  </div>`;
+
+  v.innerHTML = html;
+
+  const sv = v.querySelector("#sv-polices");
+  if (sv) sv.addEventListener("click", async () => {
+    const maj = { ...lignes };
+    v.querySelectorAll("[data-pol]").forEach((sel) => {
+      maj[sel.dataset.pol] = sel.value;
+    });
+    try {
+      await api(`/projets/${nom}/fichier/polices`, {
+        method: "PUT", body: JSON.stringify({ contenu: ecrireCsv(maj, lignes) }),
+      });
+      notif("Enregistre — relance l'etape Polices pour appliquer");
+    } catch (e) { notif(e.message, true); }
+  });
+}
+
+// --- glossaire ---
+async function vueGlossaire(v) {
+  const nom = encodeURIComponent(S.actif);
+  let d;
+  try { d = await api(`/projets/${nom}/fichier/glossaire`); }
+  catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
+
+  const lignes = csvLignes(d.contenu);
+  const pieges = lignes.filter((l) => l.source && l.source === l.target);
+
+  let html = `<div class="bloc">
+    <h2 class="titre">Glossaire — ${lignes.length} termes</h2>`;
+
+  if (pieges.length) {
+    html += `<p style="color:var(--attention);margin:0 0 8px">
+      ⚠ ${pieges.length} terme(s) ou source = cible : le LLM sera force de ne pas les traduire.
+      Verifie que c'est voulu.</p>`;
+  }
+  if (!lignes.length) {
+    html += `<p class="vide">Pas encore de glossaire. Lance l'etape Glossaire.</p>`;
+  } else {
+    html += `<p class="faible" style="margin:0 0 7px">Editable. Une ligne par terme.</p>
+      <table id="tab-gloss"><tr><th style="width:45%">Source</th><th style="width:45%">Cible</th><th></th></tr>`;
+    for (const l of lignes) {
+      const piege = l.source && l.source === l.target ? ' style="color:var(--attention)"' : "";
+      html += `<tr${piege}>
+        <td><input type="text" data-src value="${echapper(l.source)}" style="width:100%"></td>
+        <td><input type="text" data-tgt value="${echapper(l.target)}" style="width:100%"></td>
+        <td><button class="btn mini" data-suppr>✕</button></td>
+      </tr>`;
+    }
+    html += `</table>
+      <div style="margin-top:8px;display:flex;gap:7px">
+        <button class="btn" id="ajout">+ Ajouter</button>
+        <button class="btn acc" id="sv-gloss">Enregistrer</button>
+      </div>`;
+  }
+  html += `</div>`;
+  v.innerHTML = html;
+
+  v.querySelectorAll("[data-suppr]").forEach((b) =>
+    b.addEventListener("click", () => b.closest("tr").remove()));
+
+  const ajout = v.querySelector("#ajout");
+  if (ajout) ajout.addEventListener("click", () => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><input type="text" data-src style="width:100%"></td>
+      <td><input type="text" data-tgt style="width:100%"></td>
+      <td><button class="btn mini" data-suppr>✕</button></td>`;
+    v.querySelector("#tab-gloss").appendChild(tr);
+    tr.querySelector("[data-suppr]").addEventListener("click", () => tr.remove());
+    tr.querySelector("[data-src]").focus();
+  });
+
+  const sv = v.querySelector("#sv-gloss");
+  if (sv) sv.addEventListener("click", async () => {
+    const out = [];
+    v.querySelectorAll("#tab-gloss tr").forEach((tr) => {
+      const s = tr.querySelector("[data-src]"), t = tr.querySelector("[data-tgt]");
+      if (s && t && s.value.trim()) out.push({ source: s.value.trim(), target: t.value.trim() });
+    });
+    const csv = "source,target,tgt_lng\n" +
+      out.map((r) => [r.source, r.target, "fr"].map(csvChamp).join(",")).join("\n") + "\n";
+    try {
+      await api(`/projets/${nom}/fichier/glossaire`, {
+        method: "PUT", body: JSON.stringify({ contenu: csv }),
+      });
+      notif("Glossaire enregistre");
+    } catch (e) { notif(e.message, true); }
+  });
+}
+
+// --- pdfs ---
+async function vuePdfs(v) {
+  const d = await api("/projets/" + encodeURIComponent(S.actif));
+  const src = d.source || [], trad = d.traduits || [];
+
+  // apparie chaque source avec sa traduction (prefixe du nom)
+  const paires = src.map((s) => {
+    const base = s.nom.replace(/\.pdf$/i, "");
+    const t = trad.find((x) => x.nom.startsWith(base));
+    return { source: s, traduit: t || null };
+  });
+
+  let html = `<div class="bloc">
+    <h2 class="titre">PDFs — ${src.length} source, ${trad.length} traduit</h2>
+    <table><tr><th>Document</th><th>Traduction</th><th></th></tr>`;
+  for (const p of paires) {
+    html += `<tr>
+      <td>${echapper(p.source.nom)}<br><span class="faible">${taille(p.source.taille)}</span></td>
+      <td>${p.traduit
+        ? echapper(p.traduit.nom) + `<br><span class="faible">${taille(p.traduit.taille)}</span>`
+        : '<span class="vide">pas encore traduit</span>'}</td>
+      <td><button class="btn mini" data-comp="${echapper(p.source.nom)}"
+          ${p.traduit ? "" : "disabled"}>Comparer</button></td>
+    </tr>`;
+  }
+  html += `</table></div><div class="bloc" id="zone-comp"></div>`;
+  v.innerHTML = html;
+
+  v.querySelectorAll("[data-comp]").forEach((b) =>
+    b.addEventListener("click", () => comparer(b.dataset.comp, paires, v)));
+}
+
+function comparer(nomSource, paires, v) {
+  const p = paires.find((x) => x.source.nom === nomSource);
+  if (!p || !p.traduit) return;
+  const n = encodeURIComponent(S.actif);
+  const zone = v.querySelector("#zone-comp");
+  zone.innerHTML = `
+    <h2 class="titre">Comparaison — ${echapper(nomSource)}</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;height:70vh">
+      <div style="display:flex;flex-direction:column;min-width:0">
+        <p class="faible" style="margin:0 0 4px">Original</p>
+        <iframe src="/api/projets/${n}/pdf/${encodeURIComponent(nomSource)}?type=source"
+          style="flex:1;width:100%;border:1px solid var(--bord);border-radius:7px"></iframe>
+      </div>
+      <div style="display:flex;flex-direction:column;min-width:0">
+        <p class="faible" style="margin:0 0 4px">Traduit</p>
+        <iframe src="/api/projets/${n}/pdf/${encodeURIComponent(p.traduit.nom)}?type=traduit"
+          style="flex:1;width:100%;border:1px solid var(--bord);border-radius:7px"></iframe>
+      </div>
+    </div>`;
+  zone.scrollIntoView({ behavior: "smooth" });
+}
+
+// --- log ---
+async function vueLog(v) {
+  v.innerHTML = `
+    <div class="bloc">
+      <h2 class="titre">Journal</h2>
+      <div style="display:flex;gap:6px;margin-bottom:9px" id="sel-etapes"></div>
+      <div class="barre-prog"><i id="barre-log"></i></div>
+      <p class="faible" id="det-log" style="margin:0 0 7px"></p>
+      <div class="log" id="log-contenu">(aucun log)</div>
+    </div>`;
+  const sel = v.querySelector("#sel-etapes");
+  sel.innerHTML = ORDRE_ETAPES.map((e) =>
+    `<button class="btn mini ${e === (S._logEtape || "polices") ? "acc" : ""}"
+      data-le="${e}">${LIBELLES[e]}</button>`).join("");
+  sel.querySelectorAll("[data-le]").forEach((b) =>
+    b.addEventListener("click", () => { S._logEtape = b.dataset.le; vueLog(v); }));
+  rafraichirLog(S._logEtape || "polices");
+}
+
+async function rafraichirLog(etape) {
+  S._logEtape = etape;
+  const c = document.querySelector("#log-contenu");
+  if (!c) return;
+  try {
+    const d = await api(`/projets/${encodeURIComponent(S.actif)}/etape/${etape}/log`);
+    c.innerHTML = echapper(d.log || "(aucun log)")
+      .replace(/\[PROGRESS\][^\n]*/g, "");
+    c.scrollTop = c.scrollHeight;
+    const b = document.querySelector("#barre-log");
+    if (b) b.style.width = (d.total ? (d.fait / d.total) * 100 : 0) + "%";
+    const det = document.querySelector("#det-log");
+    if (det) det.textContent = d.total
+      ? `${d.fait}/${d.total}  ${d.libelle || ""}  —  ${d.etat}`
+      : d.etat;
+  } catch (e) { c.textContent = "(erreur de lecture du log)"; }
+}
+
+// ---------------------------------------------------------------- csv
+
+function csvChamp(s) {
+  s = String(s ?? "");
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function csvLignes(texte) {
+  if (!texte || !texte.trim()) return [];
+  const lignes = [];
+  let champs = [], courant = "", dansGuillemets = false;
+  const src = texte.replace(/^\uFEFF/, "");
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (dansGuillemets) {
+      if (c === '"' && src[i + 1] === '"') { courant += '"'; i++; }
+      else if (c === '"') dansGuillemets = false;
+      else courant += c;
+    } else if (c === '"') dansGuillemets = true;
+    else if (c === ",") { champs.push(courant); courant = ""; }
+    else if (c === "\n") { champs.push(courant); lignes.push(champs); champs = []; courant = ""; }
+    else if (c !== "\r") courant += c;
+  }
+  if (courant || champs.length) { champs.push(courant); lignes.push(champs); }
+  if (!lignes.length) return [];
+
+  const entete = lignes[0].map((h) => h.trim());
+  return lignes.slice(1)
+    .filter((l) => l.some((c) => c.trim()))
+    .map((l) => {
+      const o = {};
+      entete.forEach((h, i) => (o[h] = l[i] ?? ""));
+      return o;
+    });
+}
+
+// pour polices.csv : on ne change que 'remplacement' et 'origine'
+function ecrireCsv(maj, lignes) {
+  const entete = ["police_origine", "remplacement", "origine", "propose", "raison", "famille", "pdfs"];
+  const out = [entete.join(",")];
+  for (const l of lignes) {
+    const r = { ...l, remplacement: maj[l.police_origine] ?? l.remplacement ?? "" };
+    if (r.remplacement && r.remplacement !== (l.propose || "")) r.origine = "manuel";
+    else if (!r.remplacement) r.origine = "defaut";
+    out.push(entete.map((h) => csvChamp(r[h])).join(","));
+  }
+  return out.join("\n") + "\n";
+}
+
+// ---------------------------------------------------------------- init
+
+$("#bascule").addEventListener("click", () => {
+  S.replie = !S.replie;
+  $("#panneau-projets").classList.toggle("replie", S.replie);
+  $("#bascule").textContent = S.replie ? "‹" : "›";
+});
+
+$("#onglets").addEventListener("click", (ev) => {
+  const b = ev.target.closest(".onglet");
+  if (!b) return;
+  S.vue = b.dataset.vue;
+  document.querySelectorAll(".onglet").forEach((o) => o.classList.toggle("on", o === b));
+  dessinerVue();
+});
+
+$("#btn-creer").addEventListener("click", () => {
+  $("#nom-projet").value = "";
+  $("#modal").classList.remove("cache");
+  $("#nom-projet").focus();
+});
+$("#modal-annuler").addEventListener("click", () => $("#modal").classList.add("cache"));
+$("#modal-creer").addEventListener("click", async () => {
+  const nom = $("#nom-projet").value.trim();
+  if (!nom) return notif("Nom requis", true);
+  try {
+    await api("/projets", { method: "POST", body: JSON.stringify({ nom }) });
+    $("#modal").classList.add("cache");
+    notif("Projet cree");
+    await chargerProjets();
+    await chargerProjet(nom);
+  } catch (e) { notif(e.message, true); }
+});
+$("#nom-projet").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("#modal-creer").click();
+});
+
+async function init() {
+  try {
+    const e = await api("/etat");
+    const p = $("#pilule-proxy");
+    p.textContent = e.proxy ? "proxy actif" : "proxy inactif";
+    p.className = "pilule " + (e.proxy ? "ok" : "ko");
+  } catch (err) { /* ignore */ }
+  await chargerProjets();
+}
+
+init();
+</script>
+</body>
+</html>
