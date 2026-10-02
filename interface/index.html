@@ -185,7 +185,19 @@
     text-align: left; font-weight: 600; color: var(--faible);
     font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
     padding: 5px 8px; border-bottom: 1px solid var(--bord);
+    white-space: nowrap;
   }
+  th.tri { cursor: pointer; user-select: none; }
+  th.tri:hover { color: var(--texte); }
+  th .fl { opacity: .3; margin-left: 3px; font-size: 9px; }
+  th.actif { color: var(--accent); }
+  th.actif .fl { opacity: 1; }
+  tr.groupe td {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    font-weight: 600; font-size: 11px; padding: 7px 8px;
+    border-top: 1px solid var(--bord);
+  }
+  .scroll-tab { max-height: 62vh; overflow: auto; }
   td { padding: 6px 8px; border-bottom: 1px solid var(--bord); }
   tr:last-child td { border-bottom: none; }
   .faible { color: var(--faible); }
@@ -258,8 +270,10 @@
       <span class="ptete-texte">Projets</span>
     </div>
     <div class="pliste" id="pliste"></div>
-    <div class="pied">
-      <button class="btn plein acc" id="btn-creer">+ Creer</button>
+    <div class="pied" style="flex-direction:column">
+      <button class="btn plein" id="btn-bench"
+        title="Test de performances des modeles (global, hors projet)">Bench des modeles</button>
+      <button class="btn plein acc" id="btn-creer">+ Creer un projet</button>
     </div>
   </aside>
 
@@ -301,6 +315,10 @@ const S = {
   projets: [], actif: null, projet: null, options: null,
   vue: "config", etapes: {}, poll: null, replie: false,
   tri: "ordre", filtrePdf: "", _logEtape: "contexte", _ctxCle: null,
+  // tri par colonne : sens 1 = croissant, -1 = decroissant, 0 = inactif
+  tris: { glossaire: {col: null, sens: 0}, polices: {col: null, sens: 0} },
+  bench: null, benchLog: null,
+  modeles: [], modelesErreur: "",
 };
 
 const ICONES = { pret: "▶", en_cours: "◐", termine: "✓", erreur: "✕", bloque: "⊘" };
@@ -345,6 +363,54 @@ function taille(o) {
   return (o / 1048576).toFixed(1) + " Mo";
 }
 
+// ---------------------------------------------------------------- tri
+
+// Cycle d'un clic sur un en-tete : croissant -> decroissant -> inactif.
+function cyclerTri(table, col) {
+  const t = S.tris[table];
+  if (t.col !== col) { t.col = col; t.sens = 1; }
+  else if (t.sens === 1) t.sens = -1;
+  else { t.col = null; t.sens = 0; }
+}
+
+function fleche(table, col) {
+  const t = S.tris[table];
+  if (t.col !== col || !t.sens) return '<span class="fl">\u25b4\u25be</span>';
+  return `<span class="fl">${t.sens === 1 ? "\u25b4" : "\u25be"}</span>`;
+}
+
+function entete(table, col, libelle, extra = "") {
+  const t = S.tris[table];
+  const actif = t.col === col && t.sens ? "actif" : "";
+  return `<th class="tri ${actif}" data-tri="${table}" data-col="${col}" ${extra}>`
+    + `${libelle}${fleche(table, col)}</th>`;
+}
+
+// Branche les clics des en-tetes d'un tableau.
+function brancherTris(racine, table, redessiner) {
+  racine.querySelectorAll(`th.tri[data-tri="${table}"]`).forEach((th) =>
+    th.addEventListener("click", () => {
+      cyclerTri(table, th.dataset.col);
+      redessiner();
+    }));
+}
+
+// Applique le tri courant. numerique : colonnes a comparer comme des nombres.
+function appliquerTri(liste, table, numerique = []) {
+  const t = S.tris[table];
+  if (!t.col || !t.sens) return liste;
+  const num = numerique.includes(t.col);
+  const cle = (o) => {
+    const v = o[t.col];
+    return num ? (Number(v) || 0) : String(v ?? "").toLowerCase();
+  };
+  return [...liste].sort((a, b) => {
+    const x = cle(a), y = cle(b);
+    const c = num ? x - y : x.localeCompare(y, "fr");
+    return c * t.sens;
+  });
+}
+
 // ---------------------------------------------------------------- projets
 
 async function chargerProjets() {
@@ -376,8 +442,21 @@ function dessinerProjets() {
     b.addEventListener("click", () => chargerProjet(b.dataset.projet)));
 }
 
+// Modeles proposes par le proxy, pour les listes deroulantes.
+async function chargerModeles() {
+  try {
+    const d = await api("/bench/modeles");
+    S.modeles = d.modeles || [];
+    S.modelesErreur = d.erreur || "";
+  } catch (e) {
+    S.modeles = [];
+    S.modelesErreur = "serveur injoignable";
+  }
+}
+
 async function chargerProjet(nom) {
   S.actif = nom;
+  if (S.vue === "bench") S.vue = "config";
   const [p, o] = await Promise.all([
     api("/projets/" + encodeURIComponent(nom)),
     api("/projets/" + encodeURIComponent(nom) + "/options").catch(() => null),
@@ -451,10 +530,13 @@ function demarrerPoll() {
 
 function dessinerVue() {
   const v = $("#vue");
+  // le bench est global : il s'affiche meme sans projet
+  if (S.vue === "bench") { vueBench(v); return; }
   if (!S.actif) {
     v.innerHTML = '<p class="vide">Aucun projet. Cree-en un avec le bouton en bas a droite.</p>';
     return;
   }
+  if (S.vue === "bench") { vueBench(v); return; }
   ({
     config: vueConfig, options: vueOptions, contexte: vueContexte,
     polices: vuePolices, glossaire: vueGlossaire, pdfs: vuePdfs, log: vueLog,
@@ -502,6 +584,45 @@ async function vueConfig(v) {
 }
 
 // --- options ---
+// Liste deroulante des modeles, avec les chiffres du dernier bench en aide.
+function listeModeles(cle, libelle, aide = "") {
+  const o = S.options || {};
+  const courant = o[cle] ?? "";
+  // performances mesurees, si on les a
+  const perf = new Map();
+  const confs = S.bench?.configs || {};
+  for (const [nomConf, lignes] of Object.entries(confs)) {
+    for (const l of lignes || []) {
+      if (!l.lat_moy_s) continue;
+      const p = perf.get(l.modele) || { lat: [], tok: [] };
+      p.lat.push(l.lat_moy_s);
+      if (l.tok_sortie_moy) p.tok.push(l.tok_sortie_moy);
+      perf.set(l.modele, p);
+    }
+  }
+  const detail = (m) => {
+    const p = perf.get(m);
+    if (!p) return "";
+    const lat = (p.lat.reduce((a, b) => a + b, 0) / p.lat.length).toFixed(1);
+    const tok = p.tok.length ? " · " + Math.round(p.tok.reduce((a, b) => a + b, 0) / p.tok.length) + " tok" : "";
+    return `${lat}s${tok}`;
+  };
+
+  const options = S.modeles.length
+    ? S.modeles.map((m) => {
+        const d = detail(m);
+        return `<option value="${echapper(m)}" ${m === courant ? "selected" : ""}>`
+          + `${echapper(m)}${d ? "  —  " + d : ""}</option>`;
+      }).join("")
+    // le modele courant n'est pas forcement dans la liste : on le garde
+    : (courant ? `<option value="${echapper(courant)}" selected>${echapper(courant)}</option>` : "");
+
+  return `<label class="champ"><span>${libelle}${aide ? " — " + aide : ""}</span>
+    <select data-opt="${cle}" style="width:100%">${options}</select>
+    ${S.modelesErreur ? `<span class="faible" style="color:var(--erreur)">
+      ${echapper(S.modelesErreur)} — liste indisponible</span>` : ""}</label>`;
+}
+
 async function vueOptions(v) {
   const o = S.options || {};
   const champ = (cle, libelle, type = "text", aide = "") => `
@@ -517,9 +638,10 @@ async function vueOptions(v) {
       <h2 class="titre">Langues et modeles</h2>
       ${champ("lang_in", "Langue source")}
       ${champ("lang_out", "Langue cible")}
-      ${champ("model", "Modele de traduction")}
-      ${champ("term_model", "Modele d'extraction de glossaire", "text",
-              "doit supporter response_format json_object")}
+      ${listeModeles("model", "Modele de traduction",
+          "le plus rapide et fiable sur nos textes")}
+      ${listeModeles("term_model", "Modele d'extraction de glossaire",
+          "doit supporter response_format json_object")}
     </div>
     <div class="bloc">
       <h2 class="titre">Debit et parallelisme</h2>
@@ -646,19 +768,27 @@ async function vuePolices(v) {
     api(`/projets/${nom}/fichier/polices`).catch(() => ({ contenu: "" })),
     api(`/projets/${nom}`),
   ]);
-  const lignes = csvLignes(csv.contenu);
+  let lignes = csvLignes(csv.contenu);
   const pol = det.polices_installees || { installees: [], telechargees: [], proposees: [], toutes: [] };
   const installees = new Set(pol.installees || []);
   const dispo = pol.toutes || [];
+
+  // tri par colonne (spans et pages sont des nombres)
+  lignes = appliquerTri(lignes, "polices", ["spans", "pages"]);
 
   let html = `<div class="bloc">
     <h2 class="titre">Detectees dans les PDFs — ${lignes.length}</h2>`;
   if (!lignes.length) {
     html += `<p class="vide">Lance l'etape Polices pour detecter.</p>`;
   } else {
-    html += `<table><tr>
-      <th>Police d'origine</th><th>Remplacee par</th><th>Origine</th>
-      <th>Propose</th><th>Famille</th><th>PDFs</th>
+    html += `<div class="scroll-tab"><table><tr>
+      ${entete("polices", "police_origine", "Police d'origine")}
+      ${entete("polices", "remplacement", "Remplacee par")}
+      ${entete("polices", "origine", "Origine")}
+      ${entete("polices", "propose", "Propose")}
+      ${entete("polices", "famille", "Famille")}
+      ${entete("polices", "spans", "Usage")}
+      ${entete("polices", "pdfs", "PDFs")}
     </tr>`;
     for (const l of lignes) {
       const opts = ['<option value="">— police par defaut —</option>'].concat(
@@ -667,16 +797,18 @@ async function vuePolices(v) {
           const sel = f === l.remplacement ? "selected" : "";
           return `<option value="${echapper(f)}" ${sel}>${echapper(f)}${marque}</option>`;
         })).join("");
+      const usage = Number(l.spans) ? `${l.spans}\u00d7 / ${l.pages || 1}p` : "—";
       html += `<tr>
         <td>${echapper(l.police_origine)}</td>
-        <td><select data-pol="${echapper(l.police_origine)}" style="max-width:230px">${opts}</select></td>
+        <td><select data-pol="${echapper(l.police_origine)}" style="max-width:210px">${opts}</select></td>
         <td><span class="tag ${echapper(l.origine || "defaut")}">${echapper(l.origine || "defaut")}</span></td>
         <td class="faible">${echapper(l.propose || "—")}</td>
         <td class="faible">${echapper(l.famille || "")}</td>
+        <td>${usage}</td>
         <td class="faible">${echapper(l.pdfs || "")}</td>
       </tr>`;
     }
-    html += `</table><div style="margin-top:8px"><button class="btn acc" id="sv-polices">
+    html += `</table></div><div style="margin-top:8px"><button class="btn acc" id="sv-polices">
       Enregistrer</button></div>`;
   }
   html += `</div>`;
@@ -707,19 +839,21 @@ async function vuePolices(v) {
     <code>analyse/polices/</code>.</p></div>`;
 
   v.innerHTML = html;
+  brancherTris(v, "polices", () => vuePolices(v));
 
   const sv = v.querySelector("#sv-polices");
   if (sv) sv.addEventListener("click", async () => {
     const maj = {};
     v.querySelectorAll("[data-pol]").forEach((s) => (maj[s.dataset.pol] = s.value));
-    const entete = ["police_origine", "remplacement", "origine", "propose", "raison", "famille", "pdfs"];
-    const out = [entete.join(",")];
+    const enteteCsv = ["police_origine", "remplacement", "origine", "propose",
+                       "raison", "famille", "spans", "pages", "pdfs"];
+    const out = [enteteCsv.join(",")];
     for (const l of lignes) {
       const r = { ...l, remplacement: maj[l.police_origine] ?? "" };
       if (r.remplacement && r.remplacement !== (l.propose || "")) r.origine = "manuel";
       else if (!r.remplacement) r.origine = "defaut";
       else r.origine = "auto";
-      out.push(entete.map((h) => csvChamp(r[h])).join(","));
+      out.push(enteteCsv.map((h) => csvChamp(r[h])).join(","));
     }
     try {
       await api(`/projets/${nom}/fichier/polices`, {
@@ -743,18 +877,31 @@ async function vueGlossaire(v) {
   if (S.filtrePdf) {
     lignes = lignes.filter((l) => (l.source_pdf || "").split("|").includes(S.filtrePdf));
   }
+
   const tri = S.tri;
-  const cmp = {
-    alpha: (a, b) => a.source.localeCompare(b.source, "fr"),
-    ordre: () => 0,
-    pdf: (a, b) => (a.source_pdf || "zz").localeCompare(b.source_pdf || "zz")
-                   || a.source.localeCompare(b.source, "fr"),
-    pages: (a, b) => (b.pages || "").split("|").length - (a.pages || "").split("|").length,
-  }[tri] || (() => 0);
-  if (tri !== "ordre") lignes = [...lignes].sort(cmp);
+  const COLONNES = {
+    ordre: null, alpha: "source", pdf: "source_pdf", pages: "nb_pages",
+  };
+  // les tris d'en-tete priment sur la liste deroulante
+  const t = S.tris.glossaire;
+  if (t.col && t.sens) {
+    lignes = appliquerTri(lignes, "glossaire", ["occurrences", "nb_pages"]);
+  } else if (tri !== "ordre") {
+    lignes = [...lignes].sort((a, b) => {
+      if (tri === "alpha") return a.source.localeCompare(b.source, "fr");
+      if (tri === "pdf")
+        return (a.source_pdf || "zz").localeCompare(b.source_pdf || "zz")
+               || a.source.localeCompare(b.source, "fr");
+      if (tri === "pages")
+        return (Number(b.nb_pages) || 0) - (Number(a.nb_pages) || 0);
+      return 0;
+    });
+  }
 
   const pieges = lignes.filter((l) => l.source && l.source === l.target);
   const affiche = lignes.slice(0, 400);
+  // groupement vertical : uniquement quand on trie par PDF
+  const groupe = tri === "pdf" && !(t.col && t.sens);
 
   let html = `<div class="bloc">
     <h2 class="titre">Glossaire — ${lignes.length} termes${S.filtrePdf ? " (filtre)" : ""}</h2>
@@ -784,21 +931,40 @@ async function vueGlossaire(v) {
       <button class="btn acc" id="sv-gloss">Enregistrer</button>
       <button class="btn danger" id="suppr-tout">Tout supprimer</button>
     </div>
-    <table id="tab-gloss"><tr>
-      <th style="width:30%">Source</th><th style="width:30%">Cible</th>
-      <th>PDF d'origine</th><th>Pages</th><th></th>
+    <div class="scroll-tab"><table id="tab-gloss"><tr>
+      ${entete("glossaire", "source", "Source", 'style="width:26%"')}
+      ${entete("glossaire", "target", "Cible", 'style="width:26%"')}
+      ${entete("glossaire", "occurrences", "Occ.")}
+      ${entete("glossaire", "nb_pages", "Pages")}
+      ${entete("glossaire", "source_pdf", "PDF d'origine")}
+      ${entete("glossaire", "origine", "Origine")}
+      <th></th>
     </tr>`;
+
+  let dernierPdf = null;
   for (const l of affiche) {
+    // separateur vertical quand on groupe par PDF
+    if (groupe) {
+      const pdf = (l.source_pdf || "(sans PDF)").split("|")[0];
+      if (pdf !== dernierPdf) {
+        const n = affiche.filter((x) => (x.source_pdf || "(sans PDF)").split("|")[0] === pdf).length;
+        html += `<tr class="groupe"><td colspan="7">${echapper(pdf)}
+          <span class="faible" style="font-weight:400"> — ${n} terme(s)</span></td></tr>`;
+        dernierPdf = pdf;
+      }
+    }
     const piege = l.source && l.source === l.target ? ' style="color:var(--attention)"' : "";
     html += `<tr${piege}>
       <td><input type="text" data-src value="${echapper(l.source)}" style="width:100%"></td>
       <td><input type="text" data-tgt value="${echapper(l.target)}" style="width:100%"></td>
+      <td class="faible">${echapper(l.occurrences || "—")}</td>
+      <td class="faible">${echapper(l.nb_pages || "—")}</td>
       <td class="faible" style="font-size:11px">${echapper((l.source_pdf || "").replace(/\|/g, " · "))}</td>
-      <td class="faible" style="font-size:11px">${echapper((l.pages || "").split("|").map((p) => p.split(":").pop()).join(", "))}</td>
+      <td><span class="tag ${echapper(l.origine || "auto")}">${echapper(l.origine || "auto")}</span></td>
       <td><button class="btn mini" data-suppr>✕</button></td>
     </tr>`;
   }
-  html += `</table>`;
+  html += `</table></div>`;
   if (lignes.length > affiche.length) {
     html += `<p class="faible">${lignes.length - affiche.length} terme(s) non affiche(s).
       Affine le filtre pour les voir.</p>`;
@@ -806,7 +972,14 @@ async function vueGlossaire(v) {
   html += `</div>`;
   v.innerHTML = html;
 
-  v.querySelector("#tri").addEventListener("change", (e) => { S.tri = e.target.value; vueGlossaire(v); });
+  brancherTris(v, "glossaire", () => vueGlossaire(v));
+
+  v.querySelector("#tri").addEventListener("change", (e) => {
+    S.tri = e.target.value;
+    // la liste deroulante remet le tri d'en-tete a zero : sinon il gagnerait
+    S.tris.glossaire = { col: null, sens: 0 };
+    vueGlossaire(v);
+  });
   v.querySelector("#filtre").addEventListener("change", (e) => { S.filtrePdf = e.target.value; vueGlossaire(v); });
 
   v.querySelectorAll("[data-suppr]").forEach((b) =>
@@ -816,7 +989,8 @@ async function vueGlossaire(v) {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td><input type="text" data-src style="width:100%"></td>
       <td><input type="text" data-tgt style="width:100%"></td>
-      <td class="faible">—</td><td class="faible">—</td>
+      <td class="faible">—</td><td class="faible">—</td><td class="faible">—</td>
+      <td><span class="tag manuel">manuel</span></td>
       <td><button class="btn mini" data-suppr>✕</button></td>`;
     v.querySelector("#tab-gloss").appendChild(tr);
     tr.querySelector("[data-suppr]").addEventListener("click", () => tr.remove());
@@ -828,7 +1002,8 @@ async function vueGlossaire(v) {
     try {
       await api(`/projets/${nom}/fichier/glossaire`, {
         method: "PUT",
-        body: JSON.stringify({ contenu: "source,target,tgt_lng,source_pdf,pages,origine\n" }) });
+        body: JSON.stringify({ contenu:
+          "source,target,tgt_lng,source_pdf,pages,origine,occurrences,nb_pages\n" }) });
       notif("Glossaire vide"); S.filtrePdf = ""; vueGlossaire(v);
     } catch (e) { notif(e.message, true); }
   });
@@ -836,18 +1011,22 @@ async function vueGlossaire(v) {
   v.querySelector("#sv-gloss").addEventListener("click", async () => {
     const out = [];
     v.querySelectorAll("#tab-gloss tr").forEach((tr) => {
+      if (tr.classList.contains("groupe")) return;
       const s = tr.querySelector("[data-src]"), t = tr.querySelector("[data-tgt]");
       if (!s || !t || !s.value.trim()) return;
       const tds = tr.querySelectorAll("td");
       out.push({
         source: s.value.trim(), target: t.value.trim(), tgt_lng: "fr",
-        source_pdf: (tds[2]?.textContent || "").replace(/ · /g, "|").trim(),
+        source_pdf: (tds[4]?.textContent || "").replace(/ · /g, "|").trim(),
         pages: "", origine: "manuel",
+        occurrences: (tds[2]?.textContent || "").trim(),
+        nb_pages: (tds[3]?.textContent || "").trim(),
       });
     });
-    const entete = "source,target,tgt_lng,source_pdf,pages,origine";
-    const csv = entete + "\n" + out.map((r) =>
-      [r.source, r.target, r.tgt_lng, r.source_pdf, r.pages, r.origine].map(csvChamp).join(",")).join("\n") + "\n";
+    const enteteCsv = "source,target,tgt_lng,source_pdf,pages,origine,occurrences,nb_pages";
+    const csv = enteteCsv + "\n" + out.map((r) =>
+      [r.source, r.target, r.tgt_lng, r.source_pdf, r.pages, r.origine,
+       r.occurrences, r.nb_pages].map(csvChamp).join(",")).join("\n") + "\n";
     try {
       await api(`/projets/${nom}/fichier/glossaire`, { method: "PUT", body: JSON.stringify({ contenu: csv }) });
       notif("Glossaire enregistre");
@@ -982,6 +1161,118 @@ function comparer(nomSource, trad, v) {
   zone.scrollIntoView({ behavior: "smooth" });
 }
 
+// --- bench (global, hors projet) ---
+async function vueBench(v) {
+  let d;
+  try { d = await api("/bench/resultats"); }
+  catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
+  S.bench = d;
+
+  const confs = d.configs || {};
+  const enCours = d.etat === "en_cours";
+
+  let html = `<div class="bloc">
+    <h2 class="titre">Test de performances — global</h2>
+    <p class="faible" style="margin:0 0 9px">
+      Mesure les modeles gratuits du proxy sur ${(Object.keys(confs).length) ? "des" : "6"} textes de
+      reference. Les resultats servent a choisir dans <b>Options</b>.
+      ${d.maj ? `Dernier test : ${echapper(d.maj)}.` : ""}</p>
+
+    <div class="rangee" style="margin-bottom:9px">
+      <label class="rangee"><span class="faible">Configs</span>
+        <select id="cfg">
+          <option value="rapide">Rapide (1 config, ~1 min)</option>
+          <option value="complet">Complet (6 configs, ~15 min)</option>
+        </select></label>
+      <label class="rangee"><span class="faible">Appels en parallele</span>
+        <input type="number" id="wk" value="3" min="1" max="8" style="width:64px"></label>
+      <button class="btn acc" id="lancer" ${enCours ? "disabled" : ""}>
+        ${enCours ? "Test en cours…" : "Lancer le test"}</button>
+      ${enCours ? '<button class="btn danger" id="stop">Arreter</button>' : ""}
+      <button class="btn" id="rafraichir">Rafraichir</button>
+    </div>
+
+    <div class="barre-prog"><i id="barre-bench"></i></div>
+    <div class="log" id="log-bench" style="max-height:150px">${echapper(d.log || "(aucun log)")}</div>
+  </div>`;
+
+  // --- modeles a tester
+  html += `<div class="bloc">
+    <h2 class="titre">Modeles a tester — ${S.modeles.length}</h2>
+    <div class="rangee" style="margin-bottom:7px">
+      <button class="btn mini" id="tous-mod">Tout cocher</button>
+      <button class="btn mini" id="aucun-mod">Tout decocher</button>
+      <span class="faible">${S.modeles.length} modeles gratuits disponibles</span>
+    </div>
+    <div class="scroll" style="max-height:200px;columns:2">
+      ${S.modeles.map((m) => `<label class="case">
+        <input type="checkbox" data-mod="${echapper(m)}" checked>
+        <span style="font-size:11.5px">${echapper(m)}</span></label>`).join("")}
+    </div>
+    ${S.modelesErreur ? `<p class="vide">${echapper(S.modelesErreur)}</p>` : ""}
+  </div>`;
+
+  // --- resultats
+  const nomsConf = Object.keys(confs);
+  if (!nomsConf.length) {
+    html += `<div class="bloc"><p class="vide">Aucun resultat. Lance un test.</p></div>`;
+  } else {
+    for (const nomConf of nomsConf) {
+      const lignes = [...(confs[nomConf] || [])].sort(
+        (a, b) => (a.lat_moy_s ?? 9999) - (b.lat_moy_s ?? 9999));
+      html += `<div class="bloc">
+        <h2 class="titre">${echapper(nomConf)}</h2>
+        <div class="scroll-tab"><table><tr>
+          <th>Modele</th><th>Reussis</th><th>Latence moy.</th><th>Max</th>
+          <th>Tokens</th><th>Reflexion</th><th>Balises</th><th>Ratio</th><th>Erreur</th>
+        </tr>`;
+      for (const l of lignes) {
+        const bon = l.lat_moy_s && l.lat_moy_s < 8;
+        html += `<tr>
+          <td>${echapper(l.modele)}</td>
+          <td class="${l.ok?.startsWith(l.ok?.split("/")[1]) ? "" : "faible"}">${echapper(l.ok)}</td>
+          <td${bon ? ' style="color:var(--ok)"' : ""}>${l.lat_moy_s ?? "—"}s</td>
+          <td class="faible">${l.lat_max_s ?? "—"}s</td>
+          <td class="faible">${l.tok_sortie_moy ?? "—"}</td>
+          <td class="faible">${echapper(l.reflexion_fuite ?? "—")}</td>
+          <td>${echapper(l.balises ?? "—")}</td>
+          <td class="faible">${l.ratio ?? "—"}</td>
+          <td class="faible" style="font-size:10.5px">${echapper((l.erreur || "").slice(0, 40))}</td>
+        </tr>`;
+      }
+      html += `</table></div></div>`;
+    }
+  }
+
+  v.innerHTML = html;
+
+  const btn = v.querySelector("#lancer");
+  if (btn) btn.addEventListener("click", async () => {
+    const modeles = [...v.querySelectorAll("[data-mod]:checked")].map((c) => c.dataset.mod);
+    if (!modeles.length) return notif("Coche au moins un modele", true);
+    try {
+      await api("/bench/lancer", { method: "POST", body: JSON.stringify({
+        modeles, configs: [v.querySelector("#cfg").value],
+        workers: Number(v.querySelector("#wk").value) || 3,
+      }) });
+      notif("Test lance");
+      vueBench(v);
+    } catch (e) { notif(e.message, true); }
+  });
+  const stop = v.querySelector("#stop");
+  if (stop) stop.addEventListener("click", async () => {
+    try { await api("/bench/arreter", { method: "POST", body: "{}" }); notif("Arrete"); vueBench(v); }
+    catch (e) { notif(e.message, true); }
+  });
+  v.querySelector("#rafraichir").addEventListener("click", () => vueBench(v));
+  v.querySelector("#tous-mod").addEventListener("click", () => {
+    v.querySelectorAll("[data-mod]").forEach((c) => (c.checked = true));
+  });
+  v.querySelector("#aucun-mod").addEventListener("click", () => {
+    v.querySelectorAll("[data-mod]").forEach((c) => (c.checked = false));
+  });
+}
+
 // --- log ---
 async function vueLog(v) {
   v.innerHTML = `
@@ -1067,6 +1358,14 @@ $("#onglets").addEventListener("click", (ev) => {
   dessinerVue();
 });
 
+// Le bench n'est pas un projet : on decoche les onglets pendant qu'on est dedans.
+$("#btn-bench").addEventListener("click", () => {
+  S.vue = "bench";
+  document.querySelectorAll(".onglet").forEach((o) => o.classList.remove("on"));
+  $("#projet-titre").textContent = "";
+  dessinerVue();
+});
+
 $("#btn-creer").addEventListener("click", () => {
   $("#nom-projet").value = "";
   $("#modal").classList.remove("cache");
@@ -1091,7 +1390,24 @@ $("#nom-projet").addEventListener("keydown", (e) => {
 async function init() {
   await majProxy();
   setInterval(majProxy, 10000);   // reverifie regulierement
+  await chargerModeles();
+  suivreBench();
   await chargerProjets();
+}
+
+// Rafraichit le panneau bench tant qu'un test tourne.
+function suivreBench() {
+  clearInterval(S.benchLog);
+  S.benchLog = setInterval(async () => {
+    if (S.vue !== "bench") return;
+    try {
+      const d = await api("/bench/resultats");
+      const log = document.querySelector("#log-bench");
+      if (log) { log.textContent = d.log || "(aucun log)"; log.scrollTop = log.scrollHeight; }
+      if (d.etat !== "en_cours" && S.bench?.etat === "en_cours") vueBench($("#vue"));
+      S.bench = d;
+    } catch (e) { /* ignore */ }
+  }, 2000);
 }
 
 async function majProxy() {

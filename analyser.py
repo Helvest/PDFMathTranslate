@@ -142,6 +142,73 @@ def pdf_fonts(path: Path) -> list[tuple[str, str]]:
     return sorted(out)
 
 
+def pdf_fonts_usage(path: Path) -> dict[str, dict]:
+    """Combien de fois chaque police est reellement utilisee.
+
+    Parcourt les spans de chaque page : chaque span porte sa police. On
+    compte les spans (une suite de caracteres d'un seul style) et les pages
+    ou la police apparait. C'est une mesure d'usage, pas d'occupation.
+
+    Retourne {nom_police: {"spans": n, "pages": n}}.
+    """
+    try:
+        import pymupdf
+    except ImportError:
+        import fitz as pymupdf
+    try:
+        doc = pymupdf.open(str(path))
+    except Exception:
+        return {}
+
+    usage: dict[str, dict] = {}
+    for pno, page in enumerate(doc, 1):
+        try:
+            d = page.get_text("dict")
+        except Exception:
+            continue
+        vues: set[str] = set()
+        for bloc in d.get("blocks", []):
+            for ligne in bloc.get("lines", []):
+                for span in ligne.get("spans", []):
+                    nom = re.sub(r"^[A-Z]{6}\+", "", span.get("font") or "")
+                    if not nom or not (span.get("text") or "").strip():
+                        continue
+                    e = usage.setdefault(nom, {"spans": 0, "pages": 0})
+                    e["spans"] += 1
+                    vues.add(nom)
+        for nom in vues:
+            usage[nom]["pages"] += 1
+    doc.close()
+    return usage
+
+
+def compter_terme(terme: str, pages: list[str]) -> tuple[int, int]:
+    """(occurrences totales, nombre de pages) pour un terme dans un PDF.
+
+    Recherche insensible a la casse, avec frontieres de mot quand le terme
+    commence et finit par un caractere de mot. Un terme ponctue (« Holy
+    Jambu - ») est cherche tel quel, sinon il ne matcherait jamais.
+    """
+    if not terme.strip() or not pages:
+        return 0, 0
+
+    debut = r"\b" if terme[0].isalnum() else ""
+    fin = r"\b" if terme[-1].isalnum() else ""
+    try:
+        motif = re.compile(debut + re.escape(terme) + fin, re.IGNORECASE)
+    except re.error:
+        return 0, 0
+
+    total = 0
+    nb_pages = 0
+    for txt in pages:
+        n = len(motif.findall(txt))
+        if n:
+            total += n
+            nb_pages += 1
+    return total, nb_pages
+
+
 def chunks(text: str) -> list[str]:
     """Decoupe une page trop longue aux fins de paragraphe."""
     if len(text) <= CHUNK_CHARS:
@@ -398,8 +465,17 @@ def step_fonts(
     found: dict[str, dict] = {}
     for pdf in pdfs:
         for fam, name in pdf_fonts(pdf):
-            e = found.setdefault(name, {"famille": fam, "pdfs": set()})
+            e = found.setdefault(
+                name, {"famille": fam, "pdfs": set(), "spans": 0, "pages": set()}
+            )
             e["pdfs"].add(pdf.name)
+        # usage reel : combien de spans, et sur combien de pages
+        for nom, u in pdf_fonts_usage(pdf).items():
+            e = found.setdefault(
+                nom, {"famille": nom, "pdfs": set(), "spans": 0, "pages": set()}
+            )
+            e["spans"] += u["spans"]
+            e["pages"].add(f"{pdf.name}:{u['pages']}")
     print(f"  {len(found)} polices distinctes, {len({v['famille'] for v in found.values()})} familles")
 
     # existant : on ne remplace jamais un fichier deja choisi a la main
@@ -483,6 +559,8 @@ def step_fonts(
                 "propose": e.get("propose", ""),
                 "raison": e.get("raison", ""),
                 "famille": r.get("famille") or e["famille"],
+                "spans": e.get("spans", 0),
+                "pages": len(e.get("pages", set())),
                 "pdfs": _resumer_pdfs(e["pdfs"]),
             }
         )
@@ -502,6 +580,8 @@ def step_fonts(
                 "propose": e.get("propose", ""),
                 "raison": e.get("raison", ""),
                 "famille": e["famille"],
+                "spans": e.get("spans", 0),
+                "pages": len(e.get("pages", set())),
                 "pdfs": _resumer_pdfs(e["pdfs"]),
             }
         )
@@ -515,6 +595,8 @@ def step_fonts(
             "propose",
             "raison",
             "famille",
+            "spans",
+            "pages",
             "pdfs",
         ],
         rows,
@@ -863,6 +945,23 @@ def step_glossary(
                 if added:
                     print(f"    {pdf.name} p{n}: +{added}")
 
+    # --- comptage : combien de fois chaque terme apparait, sur combien de pages
+    # On compte dans TOUS les PDF du projet, pas seulement ceux de ce run :
+    # sinon un terme d'un autre PDF afficherait 0 et le chiffre serait faux.
+    print("  comptage des occurrences...")
+    dossier_source = work.parent / "source"
+    tous = sorted(dossier_source.glob("*.pdf")) if dossier_source.is_dir() else pdfs
+    textes: dict[str, list[str]] = {p.name: pdf_pages(p) for p in tous}
+
+    def _compter(terme: str, _pdfs_du_terme: set) -> tuple[int, int]:
+        """(occurrences, pages) sur l'ensemble des PDF du projet."""
+        total = pages_vues = 0
+        for pages in textes.values():
+            n, np_ = compter_terme(terme, pages)
+            total += n
+            pages_vues += np_
+        return total, pages_vues
+
     # un terme deja present garde son pdf d'origine, meme s'il reapparait ailleurs
     def _fusion(src: str, ancien: str) -> str:
         vus = set(filter(None, ancien.split("|")))
@@ -879,6 +978,8 @@ def step_glossary(
                 "source_pdf": _fusion(src, ligne.get("source_pdf", "")),
                 "pages": "|".join(sorted(pages_src.get(src, set()))),
                 "origine": ligne.get("origine") or "auto",
+                "occurrences": _compter(src, origin.get(src, set()))[0],
+                "nb_pages": _compter(src, origin.get(src, set()))[1],
             }
         )
         seen.add(src)
@@ -893,11 +994,22 @@ def step_glossary(
                 "source_pdf": _fusion(src, ""),
                 "pages": "|".join(sorted(pages_src.get(src, set()))),
                 "origine": "auto",
+                "occurrences": _compter(src, origin.get(src, set()))[0],
+                "nb_pages": _compter(src, origin.get(src, set()))[1],
             }
         )
     write_csv(
         gloss_path,
-        ["source", "target", "tgt_lng", "source_pdf", "pages", "origine"],
+        [
+            "source",
+            "target",
+            "tgt_lng",
+            "source_pdf",
+            "pages",
+            "origine",
+            "occurrences",
+            "nb_pages",
+        ],
         rows,
     )
     print(f"  +{len(found)} nouveaux -> {gloss_path.name} ({len(rows)} lignes)")
