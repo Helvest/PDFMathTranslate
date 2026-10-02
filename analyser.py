@@ -173,7 +173,7 @@ def _fichier_present(fichier: str, font_dir: Path) -> bool:
     return any(c.is_file() for c in candidats)
 
 
-def _chercher_manquantes(found: dict[str, dict], font_dir: Path) -> None:
+def _chercher_manquantes(found: dict[str, dict], font_dir: Path, contexte: str = "") -> None:
     """Cherche sur dafontfree.io les polices sans remplacement.
 
     N'installe RIEN dans font_dir : les archives restent dans Work/downloads/.
@@ -193,18 +193,22 @@ def _chercher_manquantes(found: dict[str, dict], font_dir: Path) -> None:
 
     trouvees = 0
     for nom in manquantes:
-        # "FuturaPT-Book" -> on cherche la famille, plus efficace
         famille = found[nom]["famille"] or nom
-        res = dl.telecharger(famille)
+        # le LLM choisit les termes de recherche (noms usuels, synonymes,
+        # alternatives libres) plutot qu'un decoupage en dur du nom
+        termes = dl._mots_cles(nom, famille, contexte)
+        print(f"    {nom:24} termes : {', '.join(termes) or '(aucun)'}")
+
+        res = dl.telecharger(nom, termes=termes)
         if res.ok:
             trouvees += 1
             found[nom]["piste"] = res.archive.name if res.archive else ""
-            noms = ", ".join(f.name for f in res.fichiers[:3])
             archive = res.archive.name if res.archive else "(archive inconnue)"
-            print(f"    {nom:24} -> {archive} ({len(res.fichiers)} fichiers)")
+            print(f"      {'':24} -> {archive} ({len(res.fichiers)} fichiers)")
+            noms = ", ".join(f.name for f in res.fichiers[:3])
             print(f"      {'':24}    {noms}")
         else:
-            print(f"    {nom:24} -> rien trouve ({res.erreur})")
+            print(f"      {'':24} -> rien trouve ({res.erreur})")
 
     if trouvees:
         print(f"  {trouvees} archive(s) dans Work/downloads/ - a installer a la main")
@@ -218,6 +222,7 @@ def step_fonts(
     csv_path: Path,
     font_dir: Path,
     auto_download: bool = True,
+    contexte: str = "",
 ) -> None:
     """Polices : aucun LLM, instantane.
 
@@ -266,7 +271,7 @@ def step_fonts(
 
     # recherche automatique des polices non remplacees
     if auto_download:
-        _chercher_manquantes(found, font_dir)
+        _chercher_manquantes(found, font_dir, contexte)
 
     # fusion : existant d'abord, puis les nouvelles polices
     rows, seen = [], set()
@@ -300,8 +305,11 @@ def step_fonts(
 
 CTX_PAGE_PROMPT = """Tu analyses un document pour preparer sa traduction.
 
-Contexte global connu jusqu'ici :
-{global_ctx}
+Contexte du LOT (tous les documents) :
+{lot_ctx}
+
+Contexte de CE document ({doc}) :
+{doc_ctx}
 
 Voici le texte de la page {page}/{total} de "{doc}" :
 
@@ -309,58 +317,117 @@ Voici le texte de la page {page}/{total} de "{doc}" :
 {text}
 ---
 
-Reponds en 3 lignes maximum, format exact :
-GLOBAL: <la ligne a AJOUTER au contexte global si cette page apporte une information
-nouvelle et durable sur le document (univers, ton, personnages, terminologie).
-Si rien de nouveau, ecris exactement RIEN>
+Reponds en francais, en 4 lignes maximum, format exact :
+LOT: <information valable pour TOUT LE LOT : univers commun, campagne, serie,
+ton general. Seulement si cette page apporte du VRAIMENT nouveau. Si le
+contexte du lot dit deja la meme chose, ecris RIEN>
+DOC: <information propre a CE document : son sujet, ses personnages, sa
+terminologie. Seulement si nouveau. Sinon ecris RIEN>
 PAGE: <resume en une phrase de ce que contient cette page>
+
+IMPORTANT :
+- Ecris TOUT en francais, meme si le document est en anglais.
+- Ne repete pas ce qui est deja dans les contextes ci-dessus. Une ligne de
+  LOT ou DOC ne doit etre ajoutee que si elle apporte un fait nouveau, pas
+  une reformulation de ce qui precede.
 """
 
-CTX_EMPTY = "GLOBAL: RIEN\nPAGE: (page sans contenu textuel exploitable)"
+CTX_EMPTY = "(page sans contenu textuel exploitable)"
+
+
+def _lire_ligne(raw: str, prefixe: str) -> str:
+    """Extrait 'PREFIXE: valeur' d'une reponse LLM. '' si absent ou RIEN."""
+    for line in raw.splitlines():
+        if line.startswith(prefixe):
+            v = line[len(prefixe) :].strip()
+            if v and v.upper() not in ("RIEN", "NONE", "-", "(rien)"):
+                return v
+    return ""
 
 
 def step_context(pdfs: list[Path], work: Path, ctx_path: Path) -> str:
-    """Passe 1 : contexte global, mis a jour page apres page."""
-    print("\n[2/3] Contexte (passe 1, LLM)")
+    """Passe 1 : contexte a TROIS niveaux.
+
+    - lot  : commun a tous les documents (univers, campagne, serie)
+    - doc  : propre a chaque document
+    - page : resume de chaque page
+
+    Le contexte du lot s'enrichit en traversant TOUS les documents ; celui du
+    document s'enrichit page apres page. Chacun est re-injecte a l'appel
+    suivant, donc les trois niveaux se construisent progressivement.
+
+    Retourne le contexte du lot, utilise ensuite par le glossaire.
+    """
+    print("\n[2/3] Contexte (passe 1, LLM) - 3 niveaux : lot / document / page")
     if ctx_path.exists():
         print("  contexte.md deja present -> reutilise tel quel (supprimer pour refaire)")
         return ctx_path.read_text(encoding="utf-8")
 
-    global_lines: list[str] = []
-    per_page: list[str] = []
+    lot_lines: list[str] = []
+    docs: list[dict] = []  # [{"nom":..., "doc_lines":[...], "pages":[(n, resume)]}]
+
     for pdf in pdfs:
-        pages = [p for p in pdf_pages(pdf)]
+        pages = pdf_pages(pdf)
+        doc_lines: list[str] = []
+        pages_resume: list[tuple[int, str]] = []
         print(f"  {pdf.name}: {len(pages)} pages")
+
         for n, txt in enumerate(pages, 1):
             if len(txt) < MIN_PAGE_CHARS:
-                per_page.append(f"### {pdf.name} p{n}\n{CTX_EMPTY.splitlines()[1][6:]}\n")
+                pages_resume.append((n, CTX_EMPTY))
                 continue
+
             raw = llm(
                 CTX_PAGE_PROMPT.format(
-                    global_ctx="\n".join(global_lines) or "(aucun pour l'instant)",
+                    lot_ctx="\n".join(lot_lines) or "(aucun pour l'instant)",
+                    doc_ctx="\n".join(doc_lines) or "(aucun pour l'instant)",
                     page=n,
                     total=len(pages),
                     doc=pdf.name,
                     text=txt[:8000],
                 )
             )
-            g, p = "", ""
-            for line in raw.splitlines():
-                if line.startswith("GLOBAL:"):
-                    g = line[7:].strip()
-                elif line.startswith("PAGE:"):
-                    p = line[5:].strip()
-            if g and g.upper() not in ("RIEN", "NONE", "-"):
-                global_lines.append(f"- {g}")
-                print(f"    p{n}: +contexte global")
-            per_page.append(f"### {pdf.name} p{n}\n{p or '(vide)'}\n")
+            lot = _lire_ligne(raw, "LOT:")
+            doc = _lire_ligne(raw, "DOC:")
+            page = _lire_ligne(raw, "PAGE:")
 
-    out = ["# Contexte du lot\n", "## Description globale\n"]
-    out += [g if g.startswith("-") else f"- {g}" for g in global_lines] or ["(vide)"]
-    out += ["\n## Description par page\n"] + per_page
-    ctx_path.write_text("\n".join(out), encoding="utf-8")
-    print(f"  -> {ctx_path.name} ({len(global_lines)} lignes globales)")
-    return "\n".join(global_lines)
+            marques = []
+            if lot:
+                lot_lines.append(f"- {lot}")
+                marques.append("lot")
+            if doc:
+                doc_lines.append(f"- {doc}")
+                marques.append("doc")
+            if marques:
+                print(f"    p{n}: +{' +'.join(marques)}")
+
+            pages_resume.append((n, page or "(vide)"))
+
+        docs.append({"nom": pdf.name, "doc_lines": doc_lines, "pages": pages_resume})
+
+    # --- ecriture du fichier ------------------------------------------------
+    out = ["# Contexte du travail\n"]
+
+    out.append("## 1. Contexte du lot (tous les documents)\n")
+    out += lot_lines or ["(vide)"]
+
+    for d in docs:
+        out.append(f"\n## 2. Document : {d['nom']}\n")
+        out += d["doc_lines"] or ["(vide)"]
+
+    out.append("\n## 3. Description par page\n")
+    for d in docs:
+        out.append(f"\n### {d['nom']}\n")
+        for n, resume in d["pages"]:
+            out.append(f"- **p{n}** : {resume}")
+
+    ctx_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    print(
+        f"  -> {ctx_path.name} : {len(lot_lines)} lignes lot, "
+        f"{sum(len(d['doc_lines']) for d in docs)} lignes document, "
+        f"{sum(len(d['pages']) for d in docs)} pages"
+    )
+    return "\n".join(lot_lines)
 
 
 GLOSS_PROMPT = """Tu extrais les termes a traduire de facon consistante vers le {lang_out}.
@@ -524,21 +591,30 @@ def main() -> int:
     font_dir.mkdir(exist_ok=True)
     print(f"lot: {len(pdfs)} PDF(s) -> {work}")
 
-    if not a.skip_fonts:
-        step_fonts(
-            pdfs, work, work / "polices.csv", font_dir, auto_download=not a.no_download
-        )
+    # ORDRE : contexte d'abord (il nourrit la recherche de polices et le
+    # glossaire), puis polices, puis glossaire.
     if not a.skip_context:
         ctx = step_context(pdfs, work, work / "contexte.md")
     else:
         ctx = ""
+    if not a.skip_fonts:
+        step_fonts(
+            pdfs,
+            work,
+            work / "polices.csv",
+            font_dir,
+            auto_download=not a.no_download,
+            contexte=ctx,
+        )
     if not a.skip_glossary:
         step_glossary(pdfs, work, work / "glossaire.csv", ctx, a.lang_out)
 
     print("\nTermine. A verifier/corriger :")
+    print(f"  {work/'contexte.md'}")
     print(f"  {work/'glossaire.csv'}")
     print(f"  {work/'polices.csv'}")
     print(f"  {work/'polices'}  (depose tes .ttf ici)")
+    print(f"  {work.parent/'downloads'}  (archives telechargees)")
     print(f"\nPuis : bash traduire.sh   (apres branchement de ces fichiers)")
     return 0
 

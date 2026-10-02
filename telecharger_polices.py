@@ -28,6 +28,21 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
+def _llm(prompt: str) -> str:
+    """Appel LLM via analyser.py (import paresseux : ce module reste
+    utilisable seul, sans proxy Hermes)."""
+    import analyser
+
+    return analyser.llm(prompt)
+
+
+def _parse_json_array(raw: str):
+    import analyser
+
+    return analyser.parse_json_array(raw)
+
+
 BASE = "https://www.dafontfree.io"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 TIMEOUT = 90
@@ -76,32 +91,66 @@ def _slugifier(nom: str) -> str:
     return s.strip("-")
 
 
-def _mots_cles(nom: str) -> list[str]:
-    """'FuturaPT-Book' -> ['futura pt', 'futura', 'futurapt'].
+def _mots_cles_llm(police: str, famille: str, contexte: str = "") -> list[str]:
+    """Demande au LLM quels termes chercher sur dafontfree.io.
 
-    dafontfree ne trouve rien pour 'FuturaPT' colle, mais trouve 'futura'.
-    On essaie du plus precis au plus general : 'serif gothic' avant 'serif',
-    sinon 'SerifGothic' ramene toutes les polices serif du site.
+    Remplace l'ancien decoupage en dur du nom (FuturaPT -> futura), qui ne
+    marchait pas pour toutes les polices. Le LLM connait les noms usuels, les
+    synonymes et les variantes orthographiques.
     """
-    s = nom.strip()
-    # separe CamelCase : FuturaPT -> Futura PT
+    prompt = f"""Tu cherches une police sur le site dafontfree.io pour la remplacer.
+
+Police utilisee dans le document : {police}
+Famille : {famille}
+{f"Contexte du document : {contexte}" if contexte else ""}
+
+Donne les termes de recherche a essayer, du PLUS PRECIS au plus general.
+- Le nom exact d'abord, tel qu'on le taperait sur le site
+- Puis le nom de famille sans le style (ex: "FuturaPT-Book" -> "futura pt")
+- Puis des synonymes ou equivalents libres connus (ex: Futura -> Jost, Spartan)
+- Si c'est une police commerciale, propose des alternatives libres proches
+
+Regles :
+- 2 a 5 termes maximum
+- minuscules, sans tiret ni underscore
+- PAS de mots trop generiques seuls ("serif", "sans", "bold") : ils rameneraient
+  tout le site
+- si le nom contient un mot distinctif, garde-le (gothic, futura, garamond...)
+
+Reponds UNIQUEMENT par un tableau JSON de chaines, sans commentaire :
+["futura pt", "futura", "jost"]"""
+
+    raw = _llm(prompt)
+    termes = [t for t in _parse_json_array(raw) if isinstance(t, str)]
+    termes = [t.strip().lower() for t in termes if t and t.strip()]
+    # garde-fou : jamais de terme generique seul
+    generiques = {"serif", "sans", "sans serif", "bold", "italic", "regular", "font"}
+    termes = [t for t in termes if t not in generiques]
+    return termes[:5]
+
+
+def _mots_cles(nom: str, famille: str = "", contexte: str = "") -> list[str]:
+    """Termes de recherche pour une police.
+
+    Priorite au LLM ; si indisponible, repli sur un decoupage du nom.
+    """
+    try:
+        termes = _mots_cles_llm(nom, famille or nom, contexte)
+        if termes:
+            return termes
+    except Exception as e:  # noqa: BLE001
+        logger.debug("mots-cles LLM indisponibles (%s)", e)
+
+    # --- repli deterministe : 'FuturaPT-Book' -> ['futura pt', 'futura'] ---
+    s = re.sub(r"-(?:Bold|Italic|Medium|Book|Regular|Light|Thin|Black|Heavy|Oblique).*$", "", nom)
     espace = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", s)
     espace = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", espace)
     mots = espace.lower().split()
-
-    candidats = []
+    out = []
     if len(mots) > 1:
-        candidats.append(" ".join(mots))  # 'futura pt' - le plus precis
+        out.append(" ".join(mots))
     if mots:
-        candidats.append(mots[0])  # 'futura'
-    candidats.append(s.lower())  # 'futurapt'
-
-    # dedoublonne en gardant l'ordre
-    vus, out = set(), []
-    for c in candidats:
-        if c and c not in vus:
-            vus.add(c)
-            out.append(c)
+        out.append(mots[0])
     return out
 
 
@@ -174,13 +223,28 @@ def _nom_depuis_url(url: str) -> str:
     return "police.zip"
 
 
-def telecharger(nom: str, dossier: Path | None = None) -> Resultat:
-    """Cherche puis telecharge une police. Ne leve jamais : remplit .erreur."""
+def telecharger(
+    nom: str, dossier: Path | None = None, termes: list[str] | None = None
+) -> Resultat:
+    """Cherche puis telecharge une police. Ne leve jamais : remplit .erreur.
+
+    `termes` : liste de termes de recherche a essayer (fournie par le LLM).
+    Si absente, on retombe sur le decoupage automatique du nom.
+    """
     dossier = dossier or DOWNLOADS
     dossier.mkdir(parents=True, exist_ok=True)
     res = Resultat(demandee=nom)
 
-    pages = chercher(nom)
+    if termes is None:
+        termes = _mots_cles(nom)
+
+    # on essaie chaque terme, puis chaque page du terme
+    pages: list[str] = []
+    for terme in termes:
+        pages = _chercher_mot(terme, 5)
+        if pages:
+            logger.debug("terme '%s' -> %d page(s)", terme, len(pages))
+            break
     if not pages:
         res.erreur = "aucun resultat de recherche"
         return res
