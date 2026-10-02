@@ -44,9 +44,28 @@ TRADUIRE = DEPOT / "traduire.sh"
 FICHIERS_EDITABLES = {
     "consignes-contexte": "analyse/consignes-contexte.md",
     "consignes-polices": "analyse/consignes-polices.md",
-    "contexte": "analyse/contexte.md",
     "glossaire": "analyse/glossaire.csv",
     "polices": "analyse/polices.csv",
+}
+
+# Le contexte vit dans analyse/contexte/ : un .json par PDF, plus _lot.json.
+DOSSIER_CONTEXTE = "analyse/contexte"
+
+# Options de lancement, par projet. Ecrites dans <projet>/options.json.
+OPTIONS_DEFAUT = {
+    "lang_in": "en",
+    "lang_out": "fr",
+    "model": "inclusionai/ling-3.0-flash-sante:free",
+    "term_model": "meituan/longcat-2.5-preview:free",
+    "qps": 5,
+    "term_qps": 5,
+    "pool_max_workers": 5,
+    "term_pool_max_workers": 1,
+    "no_download": False,
+    "ignorer_contexte": False,
+    "glossaire_manuel": True,
+    "pdfs_analyser": [],
+    "pdfs_traduire": [],
 }
 
 DOSSIERS_PROJET = ("source", "traduits", "downloads", "analyse", "analyse/polices")
@@ -71,6 +90,9 @@ CONFLITS = {
 }
 
 ETAPES = ("contexte", "polices", "glossaire", "traduire")
+
+# "tout" enchaine les 4 etapes dans l'ordre, en un seul processus.
+ETAPES_TOUT = ("contexte", "polices", "glossaire", "traduire")
 
 RE_PROGRESS = re.compile(r"^\[PROGRESS\]\s+(\d+)/(\d+)\s*(.*)$")
 
@@ -178,20 +200,63 @@ def _suivre(projet: str, etape: str, proc: subprocess.Popen) -> None:
             e["erreur"] = f"code {proc.returncode}"
 
 
-def _lancer(projet: str, etape: str) -> None:
-    """Demarre une etape en arriere-plan."""
+def _options(projet: str) -> dict:
+    """Options de lancement du projet, completes par les valeurs par defaut."""
+    f = PROJETS / projet / "options.json"
+    opts = dict(OPTIONS_DEFAUT)
+    if f.is_file():
+        try:
+            opts.update(json.loads(f.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return opts
+
+
+def _demarrer(projet: str, etape: str) -> subprocess.Popen:
+    """Construit la commande et lance le processus, SANS le suivre.
+
+    Separe de _lancer pour que l'enchainement "tout" puisse attendre la fin
+    de chaque etape avant de lancer la suivante.
+    """
     dossier = PROJETS / projet
     log_path = dossier / "analyse" / f"{etape}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    o = _options(projet)
+
     if etape == "traduire":
         cmd = ["bash", str(TRADUIRE)]
-        env = {**os.environ, "PDF2ZH_PROJET": projet}
+        env = {
+            **os.environ,
+            "PDF2ZH_PROJET": projet,
+            "PDF2ZH_LANG_IN": str(o["lang_in"]),
+            "PDF2ZH_LANG_OUT": str(o["lang_out"]),
+            "PDF2ZH_MODEL": str(o["model"]),
+            "PDF2ZH_TERM_MODEL": str(o["term_model"]),
+            "PDF2ZH_QPS": str(o["qps"]),
+            "PDF2ZH_TERM_QPS": str(o["term_qps"]),
+            "PDF2ZH_POOL": str(o["pool_max_workers"]),
+            "PDF2ZH_TERM_POOL": str(o["term_pool_max_workers"]),
+        }
+        # la selection de PDFs passe en arguments positionnels
+        if o.get("pdfs_traduire"):
+            cmd += [str(dossier / "source" / n) for n in o["pdfs_traduire"]]
     else:
-        cmd = [str(PY), str(ANALYSER), "--projet", projet, "--etapes", etape]
+        cmd = [
+            str(PY), str(ANALYSER),
+            "--projet", projet,
+            "--etapes", etape,
+            "--lang-out", str(o["lang_out"]),
+        ]
+        if o.get("no_download"):
+            cmd.append("--no-download")
+        if o.get("ignorer_contexte"):
+            cmd.append("--ignorer-contexte")
+        if o.get("pdfs_analyser"):
+            cmd += ["--pdfs", ",".join(o["pdfs_analyser"])]
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
 
-    proc = subprocess.Popen(
+    return subprocess.Popen(
         cmd,
         cwd=str(DEPOT),
         stdout=subprocess.PIPE,
@@ -202,7 +267,27 @@ def _lancer(projet: str, etape: str) -> None:
         env=env,
         bufsize=1,
     )
+
+
+def _lancer(projet: str, etape: str) -> None:
+    """Lance une etape en arriere-plan et la suit."""
+    proc = _demarrer(projet, etape)
     threading.Thread(target=_suivre, args=(projet, etape, proc), daemon=True).start()
+
+
+def _corbeille(chemin: Path) -> None:
+    """Envoie un fichier a la corbeille. Jamais de suppression definitive.
+
+    send2trash si disponible, sinon repli sur un dossier .corbeille horodate.
+    """
+    try:
+        from send2trash import send2trash  # type: ignore
+
+        send2trash(str(chemin))
+    except ImportError:
+        cible = PROJETS / ".corbeille" / f"{chemin.name}-{int(time.time())}"
+        cible.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(chemin), str(cible))
 
 
 # ---------------------------------------------------------------- API
@@ -255,16 +340,128 @@ def api_supprimer(nom: str):
     p = _projet(nom)
     if not p.is_dir():
         raise HTTPException(404, "projet introuvable")
-    # on ne supprime jamais sans filet : le dossier part a la corbeille
-    try:
-        from send2trash import send2trash  # type: ignore
+    _corbeille(p)
+    return {"ok": True}
 
-        send2trash(str(p))
-    except ImportError:
-        # repli : deplacement vers un dossier .corbeille horodate
-        cible = PROJETS / ".corbeille" / f"{nom}-{int(time.time())}"
-        cible.parent.mkdir(exist_ok=True)
-        shutil.move(str(p), str(cible))
+
+EXT_POLICE = (".ttf", ".otf", ".ttc")
+
+
+def _polices(p: Path) -> dict:
+    """Polices disponibles : installees, telechargees, deja proposees.
+
+    On liste TOUT ce qui est utilisable, meme non installe, pour que
+    l'utilisateur puisse choisir dans une liste deroulante.
+    """
+    installees = []
+    d = p / "analyse" / "polices"
+    if d.is_dir():
+        installees = sorted(f.name for f in d.iterdir() if f.is_file())
+
+    # polices presentes dans les archives deballees de downloads/
+    telechargees = []
+    dd = p / "downloads"
+    if dd.is_dir():
+        for f in sorted(dd.rglob("*")):
+            if f.is_file() and f.suffix.lower() in EXT_POLICE:
+                # chemin relatif a downloads/, pour rester lisible
+                telechargees.append(str(f.relative_to(dd)).replace("\\", "/"))
+
+    # ce que le CSV propose deja (colonne 'propose')
+    proposees = []
+    csv_path = p / "analyse" / "polices.csv"
+    if csv_path.is_file():
+        import csv as _csv
+
+        try:
+            with csv_path.open(encoding="utf-8-sig", newline="") as f:
+                for row in _csv.DictReader(f):
+                    v = (row.get("propose") or "").strip()
+                    if v and v not in proposees:
+                        proposees.append(v)
+        except OSError:
+            pass
+
+    return {
+        "installees": installees,
+        "telechargees": telechargees,
+        "proposees": proposees,
+        "toutes": sorted(set(installees + proposees + [Path(t).name for t in telechargees])),
+    }
+
+
+def _contextes(p: Path) -> dict:
+    """Un contexte JSON par PDF, plus le lot."""
+    d = p / DOSSIER_CONTEXTE
+    if not d.is_dir():
+        return {"lot": None, "pdfs": []}
+    out = []
+    for f in sorted(d.glob("*.json")):
+        if f.name.startswith("_"):
+            continue
+        try:
+            c = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            c = {}
+        out.append({
+            "cle": f.stem,
+            "fichier": c.get("fichier", f.stem + ".pdf"),
+            "pages": len(c.get("pages", {})),
+            "points": len(c.get("points", [])),
+        })
+    lot = (d / "_lot.json").is_file()
+    return {"lot": lot, "pdfs": out}
+
+
+@app.get("/api/projets/{nom}/options")
+def api_lire_options(nom: str):
+    p = _projet(nom)
+    f = p / "options.json"
+    opts = dict(OPTIONS_DEFAUT)
+    if f.is_file():
+        try:
+            opts.update(json.loads(f.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return opts
+
+
+@app.put("/api/projets/{nom}/options")
+def api_ecrire_options(nom: str, payload: dict):
+    p = _projet(nom)
+    if not p.is_dir():
+        raise HTTPException(404, "projet introuvable")
+    # on ne garde que les cles connues : evite les fichiers pourris
+    opts = {k: payload.get(k, v) for k, v in OPTIONS_DEFAUT.items()}
+    (p / "options.json").write_text(
+        json.dumps(opts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return {"ok": True, "options": opts}
+
+
+@app.get("/api/projets/{nom}/contexte/{cle}")
+def api_lire_contexte(nom: str, cle: str):
+    """Lit un contexte JSON. cle = nom du PDF sans extension, ou _lot."""
+    p = _projet(nom)
+    f = _fichier(p, f"{DOSSIER_CONTEXTE}/{cle}.json")
+    if not f.is_file():
+        raise HTTPException(404, "contexte introuvable")
+    try:
+        return {"contenu": json.loads(f.read_text(encoding="utf-8"))}
+    except (json.JSONDecodeError, OSError) as e:
+        raise HTTPException(500, f"contexte illisible : {e}")
+
+
+@app.put("/api/projets/{nom}/contexte/{cle}")
+def api_ecrire_contexte(nom: str, cle: str, payload: dict):
+    """Ecrit un contexte JSON. Le corps est l'objet complet."""
+    p = _projet(nom)
+    f = _fichier(p, f"{DOSSIER_CONTEXTE}/{cle}.json")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(
+        json.dumps(payload.get("contenu", {}), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return {"ok": True}
 
 
@@ -303,9 +500,8 @@ def api_projet(nom: str):
         "source": _liste("source", "*.pdf"),
         "traduits": _liste("traduits", "*.pdf"),
         "downloads": _liste("downloads", "*"),
-        "polices_installees": [f.name for f in sorted((p / "analyse" / "polices").glob("*")) if f.is_file()]
-        if (p / "analyse" / "polices").is_dir()
-        else [],
+        "polices_installees": _polices(p),
+        "contextes": _contextes(p),
         "fichiers": {
             cle: (p / chemin).is_file() for cle, chemin in FICHIERS_EDITABLES.items()
         },
@@ -349,6 +545,37 @@ async def api_upload(nom: str, fichier: UploadFile):
     return {"ok": True, "nom": cible.name}
 
 
+@app.delete("/api/projets/{nom}/pdf/{fichier}")
+def api_supprimer_pdf(nom: str, fichier: str, type: str = "source"):
+    """Supprime un PDF. Passe par la corbeille, jamais definitif."""
+    p = _projet(nom)
+    dossier = "traduits" if type == "traduit" else "source"
+    f = _fichier(p, f"{dossier}/{fichier}")
+    if not f.is_file():
+        raise HTTPException(404, "PDF introuvable")
+    _corbeille(f)
+    return {"ok": True, "supprime": fichier}
+
+
+@app.post("/api/projets/{nom}/pdf/supprimer-tout")
+def api_supprimer_tous_pdf(nom: str, payload: dict):
+    """Vide source/ (et traduits/ si demande). Tout part a la corbeille."""
+    p = _projet(nom)
+    dossiers = ["traduits"] if payload.get("traduits_seulement") else ["source"]
+    if payload.get("avec_traduits") and "traduits" not in dossiers:
+        dossiers.append("traduits")
+
+    n = 0
+    for d in dossiers:
+        dossier = p / d
+        if not dossier.is_dir():
+            continue
+        for f in dossier.glob("*.pdf"):
+            _corbeille(f)
+            n += 1
+    return {"ok": True, "supprimes": n}
+
+
 @app.get("/api/projets/{nom}/pdf/{fichier}")
 def api_pdf(nom: str, fichier: str, type: str = "source"):
     p = _projet(nom)
@@ -361,7 +588,7 @@ def api_pdf(nom: str, fichier: str, type: str = "source"):
 
 @app.post("/api/projets/{nom}/etape/{etape}")
 def api_lancer_etape(nom: str, etape: str):
-    if etape not in ETAPES:
+    if etape not in ETAPES and etape != "tout":
         raise HTTPException(400, f"etape inconnue : {etape}")
     p = _projet(nom)
     if not p.is_dir():
@@ -383,6 +610,36 @@ def api_lancer_etape(nom: str, etape: str):
             "log": "",
             "debut": datetime.now().isoformat(timespec="seconds"),
         }
+
+    if etape == "tout":
+        # on enchaine dans un seul fil : chaque etape attend la precedente
+        etats["tout"] = {
+            "etat": "en_cours",
+            "fait": 0,
+            "total": 0,
+            "log": "",
+            "debut": datetime.now().isoformat(timespec="seconds"),
+        }
+
+        def enchainer() -> None:
+            for e in ETAPES_TOUT:
+                with VERROU:
+                    etats[e] = {
+                        "etat": "en_cours", "fait": 0, "total": 0,
+                        "log": "", "debut": datetime.now().isoformat(timespec="seconds"),
+                    }
+                proc = _demarrer(nom, e)
+                _suivre(nom, e, proc)
+                with VERROU:
+                    if etats[e].get("etat") == "erreur":
+                        etats["tout"]["etat"] = "erreur"
+                        etats["tout"]["erreur"] = f"{e} a echoue"
+                        return
+            with VERROU:
+                etats["tout"]["etat"] = "termine"
+
+        threading.Thread(target=enchainer, daemon=True).start()
+        return {"ok": True, "etape": "tout"}
 
     _lancer(nom, etape)
     return {"ok": True, "etape": etape}

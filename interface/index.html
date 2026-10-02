@@ -73,6 +73,7 @@
   .etape.erreur { border-color: var(--erreur); }
   .etape.erreur .ic { color: var(--erreur); }
   .etape.bloque { opacity: .45; }
+  .etape.tout { flex: 0 0 auto; padding: 5px 14px; border-color: var(--accent); }
 
   .pilule {
     border: 1px solid var(--bord); border-radius: 5px;
@@ -101,10 +102,10 @@
   .onglet.on { color: var(--texte); border-bottom-color: var(--accent); font-weight: 600; }
   .vue { flex: 1; overflow: auto; padding: 14px 16px; min-height: 0; }
 
-  /* panneau projets (droite, repliable) */
+  /* panneau projets (gauche, repliable) */
   .projets {
     flex: 0 0 210px;
-    border-left: 1px solid var(--bord);
+    border-right: 1px solid var(--bord);
     background: var(--carte);
     display: flex; flex-direction: column;
     transition: flex-basis .18s;
@@ -145,10 +146,12 @@
     background: none; border: 1px solid var(--bord); border-radius: 6px;
     padding: 5px 10px; color: var(--texte);
   }
-  .btn:hover { border-color: var(--accent); }
+  .btn:hover:not(:disabled) { border-color: var(--accent); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
   .btn.plein { width: 100%; text-align: center; }
   .btn.acc { border-color: var(--accent); color: var(--accent); }
   .btn.mini { padding: 2px 7px; font-size: 11px; }
+  .btn.danger { border-color: var(--erreur); color: var(--erreur); }
 
   h2.titre {
     font-size: 10.5px; font-weight: 600; text-transform: uppercase;
@@ -157,6 +160,8 @@
   }
   .bloc { margin-bottom: 18px; }
   .vide { color: var(--faible); font-style: italic; }
+  .faible { color: var(--faible); }
+  .rangee { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
 
   textarea {
     width: 100%; background: transparent; border: 1px solid var(--bord);
@@ -165,11 +170,15 @@
     line-height: 1.5; min-height: 120px;
   }
   textarea:focus { outline: none; border-color: var(--accent); }
-  input[type=text] {
+  input[type=text], input[type=number], select {
     background: transparent; border: 1px solid var(--bord);
     border-radius: 6px; padding: 5px 9px;
   }
-  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  select { background: var(--carte); }
+  label.champ { display: block; margin-bottom: 10px; }
+  label.champ > span { display: block; font-size: 11px; color: var(--faible); margin-bottom: 3px; }
+  .case { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
 
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th {
@@ -188,6 +197,7 @@
   .tag.auto { border-color: var(--accent); color: var(--accent); }
   .tag.manuel { border-color: var(--texte); }
   .tag.defaut { color: var(--faible); border-style: dashed; }
+  .tag.installe { border-color: var(--ok); color: var(--ok); }
 
   /* log */
   .log {
@@ -226,6 +236,7 @@
   .modal h3 { margin: 0 0 12px; font-size: 14px; }
   .modal .rangee { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
   .cache { display: none !important; }
+  .scroll { max-height: 340px; overflow: auto; }
 </style>
 </head>
 <body>
@@ -240,10 +251,22 @@
 <!-- ============ corps ============ -->
 <div class="corps">
 
-  <!-- central -->
+  <!-- projets : A GAUCHE, repliable -->
+  <aside class="projets" id="panneau-projets">
+    <div class="ptete">
+      <button class="bascule" id="bascule" title="Replier / deplier">‹</button>
+      <span class="ptete-texte">Projets</span>
+    </div>
+    <div class="pliste" id="pliste"></div>
+    <div class="pied">
+      <button class="btn plein acc" id="btn-creer">+ Creer</button>
+    </div>
+  </aside>
+
   <div class="centre">
     <div class="onglets" id="onglets">
       <button class="onglet on" data-vue="config">Config</button>
+      <button class="onglet" data-vue="options">Options</button>
       <button class="onglet" data-vue="contexte">Contexte</button>
       <button class="onglet" data-vue="polices">Polices</button>
       <button class="onglet" data-vue="glossaire">Glossaire</button>
@@ -252,18 +275,6 @@
     </div>
     <div class="vue" id="vue"></div>
   </div>
-
-  <!-- projets, repliable -->
-  <aside class="projets" id="panneau-projets">
-    <div class="ptete">
-      <span class="ptete-texte">Projets</span>
-      <button class="bascule" id="bascule" title="Replier / deplier">›</button>
-    </div>
-    <div class="pliste" id="pliste"></div>
-    <div class="pied">
-      <button class="btn plein acc" id="btn-creer">+ Creer un projet</button>
-    </div>
-  </aside>
 
 </div>
 
@@ -276,7 +287,7 @@
     <input type="text" id="nom-projet" placeholder="Nom du projet" style="width:100%">
     <div class="rangee">
       <button class="btn" id="modal-annuler">Annuler</button>
-      <button class="btn acc" id="modal-creer">Creer</button>
+      <button class="btn acc" id="modal-ok">Creer</button>
     </div>
   </div>
 </div>
@@ -287,23 +298,15 @@
 // ---------------------------------------------------------------- etat
 
 const S = {
-  projets: [],
-  actif: null,          // nom du projet courant
-  projet: null,         // detail du projet courant
-  vue: "config",
-  etapes: {},           // etat des etapes du projet courant
-  poll: null,           // timer de rafraichissement
-  replie: false,
+  projets: [], actif: null, projet: null, options: null,
+  vue: "config", etapes: {}, poll: null, replie: false,
+  tri: "ordre", filtrePdf: "", _logEtape: "contexte", _ctxCle: null,
 };
 
-const ICONES = {
-  pret: "▶", en_cours: "◐", termine: "✓", erreur: "✕", bloque: "⊘",
-};
-const ORDRE_ETAPES = ["contexte", "polices", "glossaire", "traduire"];
-const LIBELLES = {
-  contexte: "Contexte", polices: "Polices",
-  glossaire: "Glossaire", traduire: "Traduire",
-};
+const ICONES = { pret: "▶", en_cours: "◐", termine: "✓", erreur: "✕", bloque: "⊘" };
+const ORDRE = ["contexte", "polices", "glossaire", "traduire"];
+const LIB = { contexte: "Contexte", polices: "Polices", glossaire: "Glossaire",
+              traduire: "Traduire", tout: "Tout" };
 
 // ---------------------------------------------------------------- utils
 
@@ -354,7 +357,7 @@ async function chargerProjets() {
   }
   dessinerProjets();
   if (S.actif) await chargerProjet(S.actif);
-  else { S.projet = null; S.etapes = {}; dessinerEtapes(); dessinerVue(); }
+  else { S.projet = null; S.etapes = {}; S.options = null; dessinerEtapes(); dessinerVue(); }
 }
 
 function dessinerProjets() {
@@ -375,13 +378,13 @@ function dessinerProjets() {
 
 async function chargerProjet(nom) {
   S.actif = nom;
-  S.projet = await api("/projets/" + encodeURIComponent(nom));
-  S.etapes = S.projet.etapes || {};
+  const [p, o] = await Promise.all([
+    api("/projets/" + encodeURIComponent(nom)),
+    api("/projets/" + encodeURIComponent(nom) + "/options").catch(() => null),
+  ]);
+  S.projet = p; S.options = o; S.etapes = p.etapes || {};
   $("#projet-titre").textContent = nom ? "· " + nom : "";
-  dessinerProjets();
-  dessinerEtapes();
-  dessinerVue();
-  demarrerPoll();
+  dessinerProjets(); dessinerEtapes(); dessinerVue(); demarrerPoll();
 }
 
 // ---------------------------------------------------------------- etapes
@@ -392,25 +395,22 @@ function dessinerEtapes() {
     zone.innerHTML = '<span class="faible" style="padding:6px 2px">Selectionne ou cree un projet</span>';
     return;
   }
-  zone.innerHTML = ORDRE_ETAPES.map((e) => {
-    const v = S.etapes[e] || { etat: "pret", fait: 0, total: 0 };
+  const bouton = (cle) => {
+    const v = S.etapes[cle] || { etat: "pret", fait: 0, total: 0 };
     const pct = v.total ? Math.round((v.fait / v.total) * 100) : 0;
-    const det =
-      v.etat === "en_cours" ? (v.total ? `${v.fait}/${v.total}` : "demarrage…")
+    const det = v.etat === "en_cours" ? (v.total ? `${v.fait}/${v.total}` : "demarrage…")
       : v.etat === "termine" ? "termine"
       : v.etat === "erreur" ? "erreur"
-      : v.etat === "bloque" ? (v.raison || "bloque")
-      : "";
-    const desactive = v.etat === "en_cours" || v.etat === "bloque" ? "disabled" : "";
-    return `
-      <button class="etape ${v.etat}" data-etape="${e}" ${desactive}
-              title="${echapper(v.raison || v.erreur || LIBELLES[e])}">
-        <span class="barre" style="width:${pct}%"></span>
-        <span class="ic">${ICONES[v.etat] || "▶"}</span>
-        <span class="nom">${LIBELLES[e]}</span>
-        <span class="det">${echapper(det)}</span>
-      </button>`;
-  }).join("");
+      : v.etat === "bloque" ? (v.raison || "bloque") : "";
+    const off = v.etat === "en_cours" || v.etat === "bloque" ? "disabled" : "";
+    return `<button class="etape ${v.etat} ${cle === "tout" ? "tout" : ""}" data-etape="${cle}"
+              title="${echapper(v.raison || v.erreur || LIB[cle])}">
+      <span class="barre" style="width:${pct}%"></span>
+      <span class="ic">${ICONES[v.etat] || "▶"}</span>
+      <span class="nom">${LIB[cle]}</span>
+      <span class="det">${echapper(det)}</span></button>`;
+  };
+  zone.innerHTML = ORDRE.map(bouton).join("") + bouton("tout");
 
   zone.querySelectorAll("[data-etape]").forEach((b) =>
     b.addEventListener("click", () => lancerEtape(b.dataset.etape)));
@@ -419,8 +419,9 @@ function dessinerEtapes() {
 async function lancerEtape(etape) {
   try {
     await api(`/projets/${encodeURIComponent(S.actif)}/etape/${etape}`, { method: "POST" });
-    notif(LIBELLES[etape] + " lance");
-    S.etapes[etape] = { etat: "en_cours", fait: 0, total: 0 };
+    notif(LIB[etape] + " lance");
+    if (etape === "tout") ORDRE.forEach((e) => (S.etapes[e] = { etat: "en_cours", fait: 0, total: 0 }));
+    else S.etapes[etape] = { etat: "en_cours", fait: 0, total: 0 };
     dessinerEtapes();
     demarrerPoll();
   } catch (e) {
@@ -437,14 +438,11 @@ function demarrerPoll() {
       const avant = JSON.stringify(S.etapes);
       S.etapes = d.etapes || {};
       S.projet = d;
-      if (JSON.stringify(S.etapes) !== avant) dessinerEtapes();
-      // le log se rafraichit tant qu'une etape tourne
-      const actif = ORDRE_ETAPES.find((e) => S.etapes[e]?.etat === "en_cours");
-      if (actif && S.vue === "log") rafraichirLog(actif);
-      if (S.vue === "polices" || S.vue === "pdfs") {
-        // ces vues dependent de fichiers produits par les etapes
-        if (JSON.stringify(S.etapes) !== avant) dessinerVue();
+      if (JSON.stringify(S.etapes) !== avant) {
+        dessinerEtapes();
+        if (["polices", "pdfs", "contexte"].includes(S.vue)) dessinerVue();
       }
+      if (S.vue === "log") rafraichirLog(S._logEtape);
     } catch (e) { /* le serveur a peut-etre redemarre */ }
   }, 1500);
 }
@@ -457,11 +455,10 @@ function dessinerVue() {
     v.innerHTML = '<p class="vide">Aucun projet. Cree-en un avec le bouton en bas a droite.</p>';
     return;
   }
-  const f = {
-    config: vueConfig, contexte: vueContexte, polices: vuePolices,
-    glossaire: vueGlossaire, pdfs: vuePdfs, log: vueLog,
-  }[S.vue];
-  f(v);
+  ({
+    config: vueConfig, options: vueOptions, contexte: vueContexte,
+    polices: vuePolices, glossaire: vueGlossaire, pdfs: vuePdfs, log: vueLog,
+  }[S.vue] || vueConfig)(v);
 }
 
 // --- config ---
@@ -504,35 +501,142 @@ async function vueConfig(v) {
   }
 }
 
-// --- contexte ---
-async function vueContexte(v) {
-  let d;
-  try { d = await api(`/projets/${encodeURIComponent(S.actif)}/fichier/contexte`); }
-  catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
+// --- options ---
+async function vueOptions(v) {
+  const o = S.options || {};
+  const champ = (cle, libelle, type = "text", aide = "") => `
+    <label class="champ"><span>${libelle}${aide ? " — " + aide : ""}</span>
+      <input type="${type}" data-opt="${cle}" value="${echapper(o[cle] ?? "")}"
+        style="width:100%" ${type === "number" ? 'step="1" min="1"' : ""}></label>`;
+  const coche = (cle, libelle, aide = "") => `
+    <label class="case"><input type="checkbox" data-opt="${cle}" ${o[cle] ? "checked" : ""}>
+      <span>${libelle}${aide ? ' <span class="faible">— ' + aide + "</span>" : ""}</span></label>`;
 
-  if (!d.existe || !d.contenu.trim()) {
-    v.innerHTML = `<p class="vide">Pas encore de contexte.
-      Lance l'etape Contexte en haut.</p>`;
-    return;
-  }
   v.innerHTML = `
     <div class="bloc">
-      <h2 class="titre">Contexte du projet — 3 niveaux</h2>
-      <p class="faible" style="margin:0 0 7px">
-        Lot (tous les documents) · par document · par page. Editable.</p>
-      <textarea id="ta-contexte" style="min-height:420px"></textarea>
-      <div style="margin-top:7px"><button class="btn acc" id="sv-contexte">Enregistrer</button></div>
-    </div>`;
-  const ta = v.querySelector("#ta-contexte");
-  ta.value = d.contenu;
-  v.querySelector("#sv-contexte").addEventListener("click", async () => {
+      <h2 class="titre">Langues et modeles</h2>
+      ${champ("lang_in", "Langue source")}
+      ${champ("lang_out", "Langue cible")}
+      ${champ("model", "Modele de traduction")}
+      ${champ("term_model", "Modele d'extraction de glossaire", "text",
+              "doit supporter response_format json_object")}
+    </div>
+    <div class="bloc">
+      <h2 class="titre">Debit et parallelisme</h2>
+      ${champ("qps", "QPS traduction", "number")}
+      ${champ("term_qps", "QPS extraction de termes", "number")}
+      ${champ("pool_max_workers", "Workers de traduction", "number", "5 = optimum mesure")}
+      ${champ("term_pool_max_workers", "Workers d'extraction", "number", "1 evite les 429")}
+    </div>
+    <div class="bloc">
+      <h2 class="titre">Comportement des etapes</h2>
+      ${coche("no_download", "Ne pas chercher les polices sur le web", "--no-download")}
+      ${coche("ignorer_contexte", "Recalculer le contexte", "efface les .json existants")}
+      ${coche("glossaire_manuel", "Glossaire manuel seulement",
+              "le glossaire auto degrade la traduction")}
+    </div>
+    <div class="rangee">
+      <button class="btn acc" id="sv-options">Enregistrer les options</button>
+      <button class="btn" id="rst-options">Valeurs par defaut</button>
+    </div>
+    <p class="faible" style="margin-top:10px">
+      La selection des PDFs se fait dans l'onglet <b>PDFs</b>.</p>`;
+
+  v.querySelector("#sv-options").addEventListener("click", async () => {
+    const out = { ...S.options };
+    v.querySelectorAll("[data-opt]").forEach((el) => {
+      out[el.dataset.opt] = el.type === "checkbox" ? el.checked
+        : el.type === "number" ? Number(el.value) : el.value;
+    });
     try {
-      await api(`/projets/${encodeURIComponent(S.actif)}/fichier/contexte`, {
-        method: "PUT", body: JSON.stringify({ contenu: ta.value }),
-      });
-      notif("Enregistre");
+      const d = await api(`/projets/${encodeURIComponent(S.actif)}/options`, {
+        method: "PUT", body: JSON.stringify(out) });
+      S.options = d.options; notif("Options enregistrees");
     } catch (e) { notif(e.message, true); }
   });
+  v.querySelector("#rst-options").addEventListener("click", async () => {
+    try {
+      const d = await api(`/projets/${encodeURIComponent(S.actif)}/options`);
+      S.options = d; vueOptions(v); notif("Valeurs par defaut");
+    } catch (e) { notif(e.message, true); }
+  });
+}
+
+// --- contexte : un fichier par PDF ---
+async function vueContexte(v) {
+  const ctx = S.projet?.contextes || { pdfs: [], lot: false };
+  if (!ctx.pdfs.length && !ctx.lot) {
+    v.innerHTML = `<p class="vide">Pas encore de contexte. Lance l'etape Contexte en haut.</p>`;
+    return;
+  }
+  const cle = S._ctxCle || (ctx.pdfs[0]?.cle ?? "_lot");
+  v.innerHTML = `
+    <div class="bloc">
+      <h2 class="titre">Contexte — un fichier par PDF</h2>
+      <div class="rangee" id="sel-ctx" style="margin-bottom:10px">
+        ${ctx.pdfs.map((c) => `<button class="btn mini ${c.cle === cle ? "acc" : ""}"
+          data-ctx="${echapper(c.cle)}">${echapper(c.fichier)} <span class="faible">(${c.pages}p)</span></button>`).join("")}
+        ${ctx.lot ? `<button class="btn mini ${cle === "_lot" ? "acc" : ""}"
+          data-ctx="_lot">Lot <span class="faible">(commun)</span></button>` : ""}
+      </div>
+      <div id="zone-ctx"></div>
+    </div>`;
+  v.querySelectorAll("[data-ctx]").forEach((b) =>
+    b.addEventListener("click", () => { S._ctxCle = b.dataset.ctx; vueContexte(v); }));
+  await editerContexte(cle, v.querySelector("#zone-ctx"));
+}
+
+async function editerContexte(cle, zone) {
+  let d;
+  try { d = await api(`/projets/${encodeURIComponent(S.actif)}/contexte/${encodeURIComponent(cle)}`); }
+  catch (e) { zone.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
+  const c = d.contenu || {};
+
+  if (cle === "_lot") {
+    zone.innerHTML = `
+      <p class="faible">Points communs a tous les documents.</p>
+      <textarea id="ta-lot" style="min-height:220px">${echapper((c.points || []).join("\n"))}</textarea>
+      <div style="margin-top:7px"><button class="btn acc" id="sv-lot">Enregistrer</button></div>`;
+    zone.querySelector("#sv-lot").addEventListener("click", () =>
+      sauverContexte(cle, { points: zone.querySelector("#ta-lot").value
+        .split("\n").map((l) => l.trim()).filter(Boolean) }));
+    return;
+  }
+
+  const pages = Object.entries(c.pages || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
+  zone.innerHTML = `
+    <label class="champ"><span>Resume du document</span>
+      <textarea id="ta-resume" style="min-height:70px">${echapper(c.resume || "")}</textarea></label>
+    <label class="champ"><span>Points cles (un par ligne)</span>
+      <textarea id="ta-points" style="min-height:90px">${echapper((c.points || []).join("\n"))}</textarea></label>
+    <label class="champ"><span>Termes cles (separes par des virgules)</span>
+      <input type="text" id="ta-termes" value="${echapper((c.termes_cles || []).join(", "))}" style="width:100%"></label>
+    <h2 class="titre">Pages (${pages.length})</h2>
+    <div class="scroll">
+      ${pages.map(([n, txt]) => `
+        <label class="champ"><span>Page ${echapper(n)}</span>
+          <textarea data-page="${echapper(n)}" style="min-height:52px">${echapper(txt)}</textarea></label>`).join("")}
+    </div>
+    <div style="margin-top:7px"><button class="btn acc" id="sv-doc">Enregistrer</button></div>`;
+
+  zone.querySelector("#sv-doc").addEventListener("click", () => {
+    const p = {};
+    zone.querySelectorAll("[data-page]").forEach((t) => (p[t.dataset.page] = t.value));
+    sauverContexte(cle, {
+      fichier: c.fichier, resume: zone.querySelector("#ta-resume").value,
+      points: zone.querySelector("#ta-points").value.split("\n").map((l) => l.trim()).filter(Boolean),
+      termes_cles: zone.querySelector("#ta-termes").value.split(",").map((s) => s.trim()).filter(Boolean),
+      pages: p,
+    });
+  });
+}
+
+async function sauverContexte(cle, contenu) {
+  try {
+    await api(`/projets/${encodeURIComponent(S.actif)}/contexte/${encodeURIComponent(cle)}`, {
+      method: "PUT", body: JSON.stringify({ contenu }) });
+    notif("Contexte enregistre");
+  } catch (e) { notif(e.message, true); }
 }
 
 // --- polices ---
@@ -542,68 +646,86 @@ async function vuePolices(v) {
     api(`/projets/${nom}/fichier/polices`).catch(() => ({ contenu: "" })),
     api(`/projets/${nom}`),
   ]);
-
   const lignes = csvLignes(csv.contenu);
-  const installees = det.polices_installees || [];
-  const downloads = det.downloads || [];
+  const pol = det.polices_installees || { installees: [], telechargees: [], proposees: [], toutes: [] };
+  const installees = new Set(pol.installees || []);
+  const dispo = pol.toutes || [];
 
-  let html = "";
-
-  html += `<div class="bloc">
+  let html = `<div class="bloc">
     <h2 class="titre">Detectees dans les PDFs — ${lignes.length}</h2>`;
   if (!lignes.length) {
     html += `<p class="vide">Lance l'etape Polices pour detecter.</p>`;
   } else {
-    html += `<table><tr><th>Police</th><th>Remplacée par</th><th>Origine</th>
-             <th>Raison</th></tr>`;
+    html += `<table><tr>
+      <th>Police d'origine</th><th>Remplacee par</th><th>Origine</th>
+      <th>Propose</th><th>Famille</th><th>PDFs</th>
+    </tr>`;
     for (const l of lignes) {
-      const opts = ['<option value="">— aucune —</option>']
-        .concat(installees.map((f) =>
-          `<option value="${echapper(f)}" ${f === l.remplacement ? "selected" : ""}>${echapper(f)}</option>`))
-        .join("");
+      const opts = ['<option value="">— police par defaut —</option>'].concat(
+        dispo.map((f) => {
+          const marque = installees.has(f) ? " ✓" : "";
+          const sel = f === l.remplacement ? "selected" : "";
+          return `<option value="${echapper(f)}" ${sel}>${echapper(f)}${marque}</option>`;
+        })).join("");
       html += `<tr>
         <td>${echapper(l.police_origine)}</td>
-        <td><select data-pol="${echapper(l.police_origine)}" style="max-width:220px">${opts}</select></td>
+        <td><select data-pol="${echapper(l.police_origine)}" style="max-width:230px">${opts}</select></td>
         <td><span class="tag ${echapper(l.origine || "defaut")}">${echapper(l.origine || "defaut")}</span></td>
-        <td class="faible">${echapper(l.raison || "")}</td>
+        <td class="faible">${echapper(l.propose || "—")}</td>
+        <td class="faible">${echapper(l.famille || "")}</td>
+        <td class="faible">${echapper(l.pdfs || "")}</td>
       </tr>`;
     }
-    html += `</table>
-      <div style="margin-top:7px"><button class="btn acc" id="sv-polices">Enregistrer</button></div>`;
+    html += `</table><div style="margin-top:8px"><button class="btn acc" id="sv-polices">
+      Enregistrer</button></div>`;
   }
   html += `</div>`;
 
   html += `<div class="bloc">
-    <h2 class="titre">Telechargements — ${downloads.length}</h2>`;
-  if (!downloads.length) {
-    html += `<p class="vide">Aucune archive. Lance l'etape Polices.</p>`;
-  } else {
-    html += `<table><tr><th>Archive</th><th>Taille</th></tr>` +
-      downloads.map((f) => `<tr><td>${echapper(f.nom)}</td>
-        <td class="faible">${taille(f.taille)}</td></tr>`).join("") + `</table>`;
-  }
-  html += `</div>`;
-
-  html += `<div class="bloc">
-    <h2 class="titre">Installees — ${installees.length}</h2>
-    <p class="faible">${installees.length ? installees.map(echapper).join(" · ") : "(aucune)"}</p>
-    <p class="faible">Depose tes .ttf dans
-      <code>Projets/${echapper(S.actif)}/analyse/polices/</code></p>
-  </div>`;
+    <h2 class="titre">Polices disponibles</h2>
+    <p class="faible" style="margin:0 0 7px">
+      Installees : ${pol.installees?.length || 0} ·
+      dans les archives : ${pol.telechargees?.length || 0} ·
+      proposees : ${pol.proposees?.length || 0}</p>`;
+  const groupes = [
+    ["Installees (utilisables)", pol.installees || [], "installe"],
+    ["Dans les archives (a installer)",
+     (pol.telechargees || []).filter((t) => !installees.has(t.split("/").pop())), ""],
+    ["Proposees par l'analyse",
+     (pol.proposees || []).filter((x) => !installees.has(x)), ""],
+  ];
+  const yEnA = groupes.some(([, l]) => l.length);
+  html += yEnA
+    ? `<table>${groupes.map(([titre, liste, cls]) => liste.length
+        ? `<tr><td style="width:230px" class="faible">${titre}</td><td>${
+            liste.map((f) => `<span class="tag ${cls}">${echapper(f)}</span>`).join(" ")
+          }</td></tr>` : "").join("")}</table>`
+    : `<p class="vide">Aucune police. Lance l'etape Polices, ou depose des .ttf dans
+       <code>analyse/polices/</code>.</p>`;
+  html += `<p class="faible" style="margin-top:8px">
+    Les archives sont deja deballees. Installe une police en la copiant dans
+    <code>analyse/polices/</code>.</p></div>`;
 
   v.innerHTML = html;
 
   const sv = v.querySelector("#sv-polices");
   if (sv) sv.addEventListener("click", async () => {
-    const maj = { ...lignes };
-    v.querySelectorAll("[data-pol]").forEach((sel) => {
-      maj[sel.dataset.pol] = sel.value;
-    });
+    const maj = {};
+    v.querySelectorAll("[data-pol]").forEach((s) => (maj[s.dataset.pol] = s.value));
+    const entete = ["police_origine", "remplacement", "origine", "propose", "raison", "famille", "pdfs"];
+    const out = [entete.join(",")];
+    for (const l of lignes) {
+      const r = { ...l, remplacement: maj[l.police_origine] ?? "" };
+      if (r.remplacement && r.remplacement !== (l.propose || "")) r.origine = "manuel";
+      else if (!r.remplacement) r.origine = "defaut";
+      else r.origine = "auto";
+      out.push(entete.map((h) => csvChamp(r[h])).join(","));
+    }
     try {
       await api(`/projets/${nom}/fichier/polices`, {
-        method: "PUT", body: JSON.stringify({ contenu: ecrireCsv(maj, lignes) }),
-      });
+        method: "PUT", body: JSON.stringify({ contenu: out.join("\n") + "\n" }) });
       notif("Enregistre — relance l'etape Polices pour appliquer");
+      vuePolices(v);
     } catch (e) { notif(e.message, true); }
   });
 }
@@ -615,66 +737,119 @@ async function vueGlossaire(v) {
   try { d = await api(`/projets/${nom}/fichier/glossaire`); }
   catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
 
-  const lignes = csvLignes(d.contenu);
+  let lignes = csvLignes(d.contenu);
+  const tousPdfs = [...new Set(lignes.flatMap((l) => (l.source_pdf || "").split("|").filter(Boolean)))];
+
+  if (S.filtrePdf) {
+    lignes = lignes.filter((l) => (l.source_pdf || "").split("|").includes(S.filtrePdf));
+  }
+  const tri = S.tri;
+  const cmp = {
+    alpha: (a, b) => a.source.localeCompare(b.source, "fr"),
+    ordre: () => 0,
+    pdf: (a, b) => (a.source_pdf || "zz").localeCompare(b.source_pdf || "zz")
+                   || a.source.localeCompare(b.source, "fr"),
+    pages: (a, b) => (b.pages || "").split("|").length - (a.pages || "").split("|").length,
+  }[tri] || (() => 0);
+  if (tri !== "ordre") lignes = [...lignes].sort(cmp);
+
   const pieges = lignes.filter((l) => l.source && l.source === l.target);
+  const affiche = lignes.slice(0, 400);
 
   let html = `<div class="bloc">
-    <h2 class="titre">Glossaire — ${lignes.length} termes</h2>`;
+    <h2 class="titre">Glossaire — ${lignes.length} termes${S.filtrePdf ? " (filtre)" : ""}</h2>
+    ${pieges.length ? `<p style="color:var(--attention);margin:0 0 8px">
+      ⚠ ${pieges.length} terme(s) ou source = cible : le LLM sera force de ne pas les traduire.</p>` : ""}`;
 
-  if (pieges.length) {
-    html += `<p style="color:var(--attention);margin:0 0 8px">
-      ⚠ ${pieges.length} terme(s) ou source = cible : le LLM sera force de ne pas les traduire.
-      Verifie que c'est voulu.</p>`;
+  if (!d.contenu.trim()) {
+    html += `<p class="vide">Pas encore de glossaire. Lance l'etape Glossaire.</p></div>`;
+    v.innerHTML = html;
+    return;
   }
-  if (!lignes.length) {
-    html += `<p class="vide">Pas encore de glossaire. Lance l'etape Glossaire.</p>`;
-  } else {
-    html += `<p class="faible" style="margin:0 0 7px">Editable. Une ligne par terme.</p>
-      <table id="tab-gloss"><tr><th style="width:45%">Source</th><th style="width:45%">Cible</th><th></th></tr>`;
-    for (const l of lignes) {
-      const piege = l.source && l.source === l.target ? ' style="color:var(--attention)"' : "";
-      html += `<tr${piege}>
-        <td><input type="text" data-src value="${echapper(l.source)}" style="width:100%"></td>
-        <td><input type="text" data-tgt value="${echapper(l.target)}" style="width:100%"></td>
-        <td><button class="btn mini" data-suppr>✕</button></td>
-      </tr>`;
-    }
-    html += `</table>
-      <div style="margin-top:8px;display:flex;gap:7px">
-        <button class="btn" id="ajout">+ Ajouter</button>
-        <button class="btn acc" id="sv-gloss">Enregistrer</button>
-      </div>`;
+
+  html += `<div class="rangee" style="margin-bottom:9px">
+      <label class="rangee"><span class="faible">Trier</span>
+        <select id="tri">
+          <option value="ordre" ${tri === "ordre" ? "selected" : ""}>Ordre trouve</option>
+          <option value="alpha" ${tri === "alpha" ? "selected" : ""}>Alphabetique</option>
+          <option value="pdf" ${tri === "pdf" ? "selected" : ""}>Par PDF</option>
+          <option value="pages" ${tri === "pages" ? "selected" : ""}>Par nombre de pages</option>
+        </select></label>
+      <label class="rangee"><span class="faible">PDF</span>
+        <select id="filtre">
+          <option value="">tous</option>
+          ${tousPdfs.map((p) => `<option value="${echapper(p)}" ${p === S.filtrePdf ? "selected" : ""}>${echapper(p)}</option>`).join("")}
+        </select></label>
+      <button class="btn" id="ajout">+ Ajouter</button>
+      <button class="btn acc" id="sv-gloss">Enregistrer</button>
+      <button class="btn danger" id="suppr-tout">Tout supprimer</button>
+    </div>
+    <table id="tab-gloss"><tr>
+      <th style="width:30%">Source</th><th style="width:30%">Cible</th>
+      <th>PDF d'origine</th><th>Pages</th><th></th>
+    </tr>`;
+  for (const l of affiche) {
+    const piege = l.source && l.source === l.target ? ' style="color:var(--attention)"' : "";
+    html += `<tr${piege}>
+      <td><input type="text" data-src value="${echapper(l.source)}" style="width:100%"></td>
+      <td><input type="text" data-tgt value="${echapper(l.target)}" style="width:100%"></td>
+      <td class="faible" style="font-size:11px">${echapper((l.source_pdf || "").replace(/\|/g, " · "))}</td>
+      <td class="faible" style="font-size:11px">${echapper((l.pages || "").split("|").map((p) => p.split(":").pop()).join(", "))}</td>
+      <td><button class="btn mini" data-suppr>✕</button></td>
+    </tr>`;
+  }
+  html += `</table>`;
+  if (lignes.length > affiche.length) {
+    html += `<p class="faible">${lignes.length - affiche.length} terme(s) non affiche(s).
+      Affine le filtre pour les voir.</p>`;
   }
   html += `</div>`;
   v.innerHTML = html;
 
+  v.querySelector("#tri").addEventListener("change", (e) => { S.tri = e.target.value; vueGlossaire(v); });
+  v.querySelector("#filtre").addEventListener("change", (e) => { S.filtrePdf = e.target.value; vueGlossaire(v); });
+
   v.querySelectorAll("[data-suppr]").forEach((b) =>
     b.addEventListener("click", () => b.closest("tr").remove()));
 
-  const ajout = v.querySelector("#ajout");
-  if (ajout) ajout.addEventListener("click", () => {
+  v.querySelector("#ajout").addEventListener("click", () => {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td><input type="text" data-src style="width:100%"></td>
       <td><input type="text" data-tgt style="width:100%"></td>
+      <td class="faible">—</td><td class="faible">—</td>
       <td><button class="btn mini" data-suppr>✕</button></td>`;
     v.querySelector("#tab-gloss").appendChild(tr);
     tr.querySelector("[data-suppr]").addEventListener("click", () => tr.remove());
     tr.querySelector("[data-src]").focus();
   });
 
-  const sv = v.querySelector("#sv-gloss");
-  if (sv) sv.addEventListener("click", async () => {
+  v.querySelector("#suppr-tout").addEventListener("click", async () => {
+    if (!confirm(`Supprimer les ${lignes.length} termes du glossaire ?`)) return;
+    try {
+      await api(`/projets/${nom}/fichier/glossaire`, {
+        method: "PUT",
+        body: JSON.stringify({ contenu: "source,target,tgt_lng,source_pdf,pages,origine\n" }) });
+      notif("Glossaire vide"); S.filtrePdf = ""; vueGlossaire(v);
+    } catch (e) { notif(e.message, true); }
+  });
+
+  v.querySelector("#sv-gloss").addEventListener("click", async () => {
     const out = [];
     v.querySelectorAll("#tab-gloss tr").forEach((tr) => {
       const s = tr.querySelector("[data-src]"), t = tr.querySelector("[data-tgt]");
-      if (s && t && s.value.trim()) out.push({ source: s.value.trim(), target: t.value.trim() });
-    });
-    const csv = "source,target,tgt_lng\n" +
-      out.map((r) => [r.source, r.target, "fr"].map(csvChamp).join(",")).join("\n") + "\n";
-    try {
-      await api(`/projets/${nom}/fichier/glossaire`, {
-        method: "PUT", body: JSON.stringify({ contenu: csv }),
+      if (!s || !t || !s.value.trim()) return;
+      const tds = tr.querySelectorAll("td");
+      out.push({
+        source: s.value.trim(), target: t.value.trim(), tgt_lng: "fr",
+        source_pdf: (tds[2]?.textContent || "").replace(/ · /g, "|").trim(),
+        pages: "", origine: "manuel",
       });
+    });
+    const entete = "source,target,tgt_lng,source_pdf,pages,origine";
+    const csv = entete + "\n" + out.map((r) =>
+      [r.source, r.target, r.tgt_lng, r.source_pdf, r.pages, r.origine].map(csvChamp).join(",")).join("\n") + "\n";
+    try {
+      await api(`/projets/${nom}/fichier/glossaire`, { method: "PUT", body: JSON.stringify({ contenu: csv }) });
       notif("Glossaire enregistre");
     } catch (e) { notif(e.message, true); }
   });
@@ -682,39 +857,114 @@ async function vueGlossaire(v) {
 
 // --- pdfs ---
 async function vuePdfs(v) {
-  const d = await api("/projets/" + encodeURIComponent(S.actif));
-  const src = d.source || [], trad = d.traduits || [];
-
-  // apparie chaque source avec sa traduction (prefixe du nom)
-  const paires = src.map((s) => {
-    const base = s.nom.replace(/\.pdf$/i, "");
-    const t = trad.find((x) => x.nom.startsWith(base));
-    return { source: s, traduit: t || null };
-  });
+  const nom = encodeURIComponent(S.actif);
+  const d = await api("/projets/" + nom);
+  const o = S.options || {};
+  const src_ = d.source || [], trad = d.traduits || [];
+  const selAnalyse = new Set(o.pdfs_analyser || []);
+  const selTraduire = new Set(o.pdfs_traduire || []);
 
   let html = `<div class="bloc">
-    <h2 class="titre">PDFs — ${src.length} source, ${trad.length} traduit</h2>
-    <table><tr><th>Document</th><th>Traduction</th><th></th></tr>`;
-  for (const p of paires) {
+    <h2 class="titre">PDFs — ${src_.length} source, ${trad.length} traduit</h2>
+    <div class="rangee" style="margin-bottom:9px">
+      <input type="file" id="fichiers" accept="application/pdf" multiple class="cache">
+      <button class="btn acc" id="btn-ajout">+ Ajouter des PDFs</button>
+      <button class="btn" id="tout-analyse">Tout cocher (analyse)</button>
+      <button class="btn" id="rien-analyse">Tout decocher (analyse)</button>
+      <button class="btn danger" id="suppr-src">Supprimer les sources</button>
+      <button class="btn danger" id="suppr-trad">Supprimer les traductions</button>
+    </div>
+    <table><tr>
+      <th>Document</th><th>Traduction</th>
+      <th title="Inclure dans l'analyse de contexte, polices et glossaire">Analyser</th>
+      <th title="Traduire dans cette execution">Traduire</th>
+      <th></th>
+    </tr>`;
+
+  if (!src_.length) html += `<tr><td colspan="5" class="vide">Aucun PDF. Ajoute-en.</td></tr>`;
+  for (const s of src_) {
+    const base = s.nom.replace(/\.pdf$/i, "");
+    const t = trad.find((x) => x.nom.startsWith(base));
     html += `<tr>
-      <td>${echapper(p.source.nom)}<br><span class="faible">${taille(p.source.taille)}</span></td>
-      <td>${p.traduit
-        ? echapper(p.traduit.nom) + `<br><span class="faible">${taille(p.traduit.taille)}</span>`
-        : '<span class="vide">pas encore traduit</span>'}</td>
-      <td><button class="btn mini" data-comp="${echapper(p.source.nom)}"
-          ${p.traduit ? "" : "disabled"}>Comparer</button></td>
+      <td>${echapper(s.nom)}<br><span class="faible">${taille(s.taille)}</span></td>
+      <td>${t ? echapper(t.nom) + `<br><span class="faible">${taille(t.taille)}</span>`
+            : '<span class="vide">pas encore traduit</span>'}</td>
+      <td><input type="checkbox" data-sel="analyse" data-nom="${echapper(s.nom)}" ${selAnalyse.has(s.nom) ? "checked" : ""}></td>
+      <td><input type="checkbox" data-sel="traduire" data-nom="${echapper(s.nom)}" ${selTraduire.has(s.nom) ? "checked" : ""}></td>
+      <td class="rangee">
+        <button class="btn mini" data-comp="${echapper(s.nom)}" ${t ? "" : "disabled"}>Comparer</button>
+        <button class="btn mini danger" data-del="${echapper(s.nom)}">✕</button>
+      </td>
     </tr>`;
   }
-  html += `</table></div><div class="bloc" id="zone-comp"></div>`;
+  html += `</table>
+    <p class="faible" style="margin-top:8px">
+      Les cases sont enregistrees avec les <b>Options</b>. Aucune cochee = tout le lot.</p>
+  </div><div class="bloc" id="zone-comp"></div>`;
   v.innerHTML = html;
 
+  const sauverSel = async () => {
+    const a = [], t = [];
+    v.querySelectorAll('[data-sel="analyse"]:checked').forEach((c) => a.push(c.dataset.nom));
+    v.querySelectorAll('[data-sel="traduire"]:checked').forEach((c) => t.push(c.dataset.nom));
+    S.options = { ...S.options, pdfs_analyser: a, pdfs_traduire: t };
+    await api(`/projets/${nom}/options`, { method: "PUT", body: JSON.stringify(S.options) });
+  };
+  v.querySelectorAll("[data-sel]").forEach((c) =>
+    c.addEventListener("change", () => sauverSel().then(() => notif("Selection enregistree"))));
+
+  const cocher = (type, val) => {
+    v.querySelectorAll(`[data-sel="${type}"]`).forEach((c) => (c.checked = val));
+    sauverSel();
+  };
+  v.querySelector("#tout-analyse").addEventListener("click", () => cocher("analyse", true));
+  v.querySelector("#rien-analyse").addEventListener("click", () => cocher("analyse", false));
+
+  v.querySelector("#btn-ajout").addEventListener("click", () => v.querySelector("#fichiers").click());
+  v.querySelector("#fichiers").addEventListener("change", async (e) => {
+    const fs = [...e.target.files];
+    for (const f of fs) {
+      const fd = new FormData(); fd.append("fichier", f);
+      try { await fetch(`/api/projets/${nom}/pdf`, { method: "POST", body: fd }); }
+      catch (err) { notif("Echec : " + f.name, true); }
+    }
+    notif(fs.length + " PDF(s) ajoute(s)"); chargerProjet(S.actif);
+  });
+
+  v.querySelector("#suppr-src").addEventListener("click", async () => {
+    if (!confirm(`Envoyer les ${src_.length} PDFs source a la corbeille ?`)) return;
+    try {
+      const r = await api(`/projets/${nom}/pdf/supprimer-tout`, {
+        method: "POST", body: JSON.stringify({}) });
+      notif(r.supprimes + " supprime(s) — recuperables dans la corbeille");
+      chargerProjet(S.actif);
+    } catch (e) { notif(e.message, true); }
+  });
+  v.querySelector("#suppr-trad").addEventListener("click", async () => {
+    if (!confirm(`Envoyer les ${trad.length} traductions a la corbeille ?`)) return;
+    try {
+      const r = await api(`/projets/${nom}/pdf/supprimer-tout`, {
+        method: "POST", body: JSON.stringify({ traduits_seulement: true }) });
+      notif(r.supprimes + " supprime(s)"); chargerProjet(S.actif);
+    } catch (e) { notif(e.message, true); }
+  });
+  v.querySelectorAll("[data-del]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (!confirm("Envoyer " + b.dataset.del + " a la corbeille ?")) return;
+      try {
+        await api(`/projets/${nom}/pdf/${encodeURIComponent(b.dataset.del)}?type=source`, { method: "DELETE" });
+        notif("Supprime"); chargerProjet(S.actif);
+      } catch (e) { notif(e.message, true); }
+    }));
+
   v.querySelectorAll("[data-comp]").forEach((b) =>
-    b.addEventListener("click", () => comparer(b.dataset.comp, paires, v)));
+    b.addEventListener("click", () => comparer(b.dataset.comp, trad, v)));
 }
 
-function comparer(nomSource, paires, v) {
-  const p = paires.find((x) => x.source.nom === nomSource);
-  if (!p || !p.traduit) return;
+function comparer(nomSource, trad, v) {
+  const base = nomSource.replace(/\.pdf$/i, "");
+  const t = trad.find((x) => x.nom.startsWith(base));
+  if (!t) return;
   const n = encodeURIComponent(S.actif);
   const zone = v.querySelector("#zone-comp");
   zone.innerHTML = `
@@ -723,13 +973,11 @@ function comparer(nomSource, paires, v) {
       <div style="display:flex;flex-direction:column;min-width:0">
         <p class="faible" style="margin:0 0 4px">Original</p>
         <iframe src="/api/projets/${n}/pdf/${encodeURIComponent(nomSource)}?type=source"
-          style="flex:1;width:100%;border:1px solid var(--bord);border-radius:7px"></iframe>
-      </div>
+          style="flex:1;width:100%;border:1px solid var(--bord);border-radius:7px"></iframe></div>
       <div style="display:flex;flex-direction:column;min-width:0">
         <p class="faible" style="margin:0 0 4px">Traduit</p>
-        <iframe src="/api/projets/${n}/pdf/${encodeURIComponent(p.traduit.nom)}?type=traduit"
-          style="flex:1;width:100%;border:1px solid var(--bord);border-radius:7px"></iframe>
-      </div>
+        <iframe src="/api/projets/${n}/pdf/${encodeURIComponent(t.nom)}?type=traduit"
+          style="flex:1;width:100%;border:1px solid var(--bord);border-radius:7px"></iframe></div>
     </div>`;
   zone.scrollIntoView({ behavior: "smooth" });
 }
@@ -744,13 +992,9 @@ async function vueLog(v) {
       <p class="faible" id="det-log" style="margin:0 0 7px"></p>
       <div class="log" id="log-contenu">(aucun log)</div>
     </div>`;
-  const sel = v.querySelector("#sel-etapes");
-  sel.innerHTML = ORDRE_ETAPES.map((e) =>
-    `<button class="btn mini ${e === (S._logEtape || "polices") ? "acc" : ""}"
-      data-le="${e}">${LIBELLES[e]}</button>`).join("");
-  sel.querySelectorAll("[data-le]").forEach((b) =>
+  v.querySelectorAll("[data-le]").forEach((b) =>
     b.addEventListener("click", () => { S._logEtape = b.dataset.le; vueLog(v); }));
-  rafraichirLog(S._logEtape || "polices");
+  rafraichirLog(S._logEtape);
 }
 
 async function rafraichirLog(etape) {
@@ -807,25 +1051,12 @@ function csvLignes(texte) {
     });
 }
 
-// pour polices.csv : on ne change que 'remplacement' et 'origine'
-function ecrireCsv(maj, lignes) {
-  const entete = ["police_origine", "remplacement", "origine", "propose", "raison", "famille", "pdfs"];
-  const out = [entete.join(",")];
-  for (const l of lignes) {
-    const r = { ...l, remplacement: maj[l.police_origine] ?? l.remplacement ?? "" };
-    if (r.remplacement && r.remplacement !== (l.propose || "")) r.origine = "manuel";
-    else if (!r.remplacement) r.origine = "defaut";
-    out.push(entete.map((h) => csvChamp(r[h])).join(","));
-  }
-  return out.join("\n") + "\n";
-}
-
 // ---------------------------------------------------------------- init
 
 $("#bascule").addEventListener("click", () => {
   S.replie = !S.replie;
   $("#panneau-projets").classList.toggle("replie", S.replie);
-  $("#bascule").textContent = S.replie ? "‹" : "›";
+  $("#bascule").textContent = S.replie ? "›" : "‹";
 });
 
 $("#onglets").addEventListener("click", (ev) => {
@@ -842,7 +1073,7 @@ $("#btn-creer").addEventListener("click", () => {
   $("#nom-projet").focus();
 });
 $("#modal-annuler").addEventListener("click", () => $("#modal").classList.add("cache"));
-$("#modal-creer").addEventListener("click", async () => {
+$("#modal-ok").addEventListener("click", async () => {
   const nom = $("#nom-projet").value.trim();
   if (!nom) return notif("Nom requis", true);
   try {
@@ -854,7 +1085,7 @@ $("#modal-creer").addEventListener("click", async () => {
   } catch (e) { notif(e.message, true); }
 });
 $("#nom-projet").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") $("#modal-creer").click();
+  if (e.key === "Enter") $("#modal-ok").click();
 });
 
 async function init() {

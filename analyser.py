@@ -2,7 +2,7 @@
 """Passe d'analyse d'un lot de PDFs : contexte, glossaire, polices.
 
 Produit dans <projet>/analyse/ :
-  contexte.md    description globale du lot + une section par page
+  contexte/      un .json par PDF (resume, points, termes, pages) + _lot.json
   glossaire.csv  source,target,tgt_lng,source_pdf   (format babeldoc + origine)
   polices.csv    police_origine,famille,fichier_remplacement,source_pdf
   polices/       dossier ou deposer les TTF de remplacement
@@ -532,7 +532,7 @@ def _resumer_pdfs(noms) -> str:
     """Resume la liste des PDF en '3 pdfs' si elle est longue.
 
     La colonne est informative : la garder courte rend le CSV lisible a l'oeil.
-    Le detail complet reste dans contexte.md.
+    Le detail complet reste dans le .json du PDF.
     """
     noms = sorted(noms)
     if len(noms) <= 2:
@@ -599,48 +599,95 @@ def _lire_ligne(raw: str, prefixe: str) -> str:
     return ""
 
 
-def step_context(pdfs: list[Path], work: Path, ctx_path: Path) -> str:
-    """Passe 1 : contexte a TROIS niveaux.
+def _lire_contexte_pdf(chemin: Path) -> dict | None:
+    """Lit un contexte JSON. None si absent ou illisible."""
+    if not chemin.is_file():
+        return None
+    try:
+        return json.loads(chemin.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  {chemin.name} illisible ({e}) -> recalcule", file=sys.stderr)
+        return None
 
-    - lot  : commun a tous les documents (univers, campagne, serie)
-    - doc  : propre a chaque document
+
+def _resume_doc(c: dict) -> str:
+    """Rend un contexte JSON lisible par le LLM (et par un humain)."""
+    out = []
+    if c.get("resume"):
+        out.append(f"Resume : {c['resume']}")
+    if c.get("points"):
+        out.append("Points cles :")
+        out += [f"- {x}" for x in c["points"]]
+    if c.get("termes_cles"):
+        out.append("Termes cles : " + ", ".join(c["termes_cles"]))
+    return "\n".join(out)
+
+
+def _resume_lot(ctxs: list[dict]) -> str:
+    """Vue condensee de tout le lot, pour nourrir les etapes suivantes."""
+    out = []
+    for c in ctxs:
+        if c.get("resume"):
+            out.append(f"- {c.get('fichier', '?')} : {c['resume']}")
+    return "\n".join(out)
+
+
+def step_context(pdfs: list[Path], work: Path, ctx_dir: Path) -> list[dict]:
+    """Passe 1 : contexte a TROIS niveaux, un fichier JSON par PDF.
+
+    - lot  : commun a tous les documents, enrichi en traversant les PDFs
+    - doc  : resume du document
     - page : resume de chaque page
 
-    Le contexte du lot s'enrichit en traversant TOUS les documents ; celui du
-    document s'enrichit page apres page. Chacun est re-injecte a l'appel
-    suivant, donc les trois niveaux se construisent progressivement.
+    Chaque PDF a son fichier <nom>.json dans ctx_dir. Un fichier deja present
+    est REUTILISE tel quel : supprime-le pour le recalculer.
 
-    Retourne le contexte du lot, utilise ensuite par le glossaire.
+    Retourne la liste des contextes (pour le glossaire et les polices).
     """
     print("\n[2/3] Contexte (passe 1, LLM) - 3 niveaux : lot / document / page")
-    if ctx_path.exists():
-        print("  contexte.md deja present -> reutilise tel quel (supprimer pour refaire)")
-        return ctx_path.read_text(encoding="utf-8")
 
-    # consignes de l'utilisateur : ce qu'il sait deja, ses sources, sa
-    # terminologie. Le LLM s'appuie dessus au lieu de tout re-deduire.
     consignes = _lire_consignes(work / "consignes-contexte.md")
     if consignes:
         print("  consignes-contexte.md lu")
 
-    lot_lines: list[str] = []
-    docs: list[dict] = []  # [{"nom":..., "doc_lines":[...], "pages":[(n, resume)]}]
+    ctx_dir.mkdir(parents=True, exist_ok=True)
 
-    # total de pages, tous documents confondus : sert a la barre de progression
+    # lot persistant : il s'enrichit d'un run a l'autre
+    lot_path = ctx_dir / "_lot.json"
+    lot_lines: list[str] = []
+    if lot_path.is_file():
+        try:
+            lot_lines = json.loads(lot_path.read_text(encoding="utf-8")).get("points", [])
+        except (json.JSONDecodeError, OSError):
+            pass
+        if lot_lines:
+            print(f"  lot existant : {len(lot_lines)} points (conserves)")
+
     total_pages = sum(len(pdf_pages(p)) for p in pdfs)
     fait = 0
+    ctxs: list[dict] = []
 
     for pdf in pdfs:
+        cible = ctx_dir / f"{pdf.stem}.json"
+        deja = _lire_contexte_pdf(cible)
+        if deja:
+            nb = len(deja.get("pages", {}))
+            print(f"  {pdf.name} : contexte deja present ({nb} pages) -> reutilise")
+            ctxs.append(deja)
+            fait += nb
+            prog(fait, total_pages, pdf.name)
+            continue
+
         pages = pdf_pages(pdf)
         doc_lines: list[str] = []
-        pages_resume: list[tuple[int, str]] = []
+        pages_resume: dict[str, str] = {}
         print(f"  {pdf.name}: {len(pages)} pages")
 
         for n, txt in enumerate(pages, 1):
             fait += 1
             prog(fait, total_pages, f"{pdf.name} p{n}")
             if len(txt) < MIN_PAGE_CHARS:
-                pages_resume.append((n, CTX_EMPTY))
+                pages_resume[str(n)] = CTX_EMPTY
                 continue
 
             raw = llm(
@@ -668,33 +715,30 @@ def step_context(pdfs: list[Path], work: Path, ctx_path: Path) -> str:
             if marques:
                 print(f"    p{n}: +{' +'.join(marques)}")
 
-            pages_resume.append((n, page or "(vide)"))
+            pages_resume[str(n)] = page or "(vide)"
 
-        docs.append({"nom": pdf.name, "doc_lines": doc_lines, "pages": pages_resume})
+        # le fichier de ce PDF : c'est lui qu'on edite a la main
+        # resume = le point principal, points = les points additionnels.
+        # Evite d'avoir deux fois la meme phrase dans le fichier.
+        ctx = {
+            "fichier": pdf.name,
+            "resume": doc_lines[0][2:] if doc_lines else "",
+            "points": [l[2:] for l in doc_lines[1:]],
+            "termes_cles": [],
+            "pages": pages_resume,
+        }
+        cible.write_text(
+            json.dumps(ctx, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        print(f"    -> {cible.name} ({len(pages_resume)} pages)")
+        ctxs.append(ctx)
 
-    # --- ecriture du fichier ------------------------------------------------
-    out = ["# Contexte du travail\n"]
-
-    out.append("## 1. Contexte du lot (tous les documents)\n")
-    out += lot_lines or ["(vide)"]
-
-    for d in docs:
-        out.append(f"\n## 2. Document : {d['nom']}\n")
-        out += d["doc_lines"] or ["(vide)"]
-
-    out.append("\n## 3. Description par page\n")
-    for d in docs:
-        out.append(f"\n### {d['nom']}\n")
-        for n, resume in d["pages"]:
-            out.append(f"- **p{n}** : {resume}")
-
-    ctx_path.write_text("\n".join(out) + "\n", encoding="utf-8")
-    print(
-        f"  -> {ctx_path.name} : {len(lot_lines)} lignes lot, "
-        f"{sum(len(d['doc_lines']) for d in docs)} lignes document, "
-        f"{sum(len(d['pages']) for d in docs)} pages"
+    lot_path.write_text(
+        json.dumps({"points": lot_lines}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
     )
-    return "\n".join(lot_lines)
+    print(f"  -> _lot.json : {len(lot_lines)} points")
+    return ctxs
 
 
 GLOSS_PROMPT = """Tu extrais les termes a traduire de facon consistante vers le {lang_out}.
@@ -740,7 +784,7 @@ Reponds UNIQUEMENT par un tableau JSON, sans commentaire :
 
 
 def step_glossary(
-    pdfs: list[Path], work: Path, gloss_path: Path, global_ctx: str, lang_out: str
+    pdfs: list[Path], work: Path, gloss_path: Path, ctxs: list[dict], lang_out: str
 ) -> None:
     """Passe 2 : extraction du glossaire, page par page, avec le contexte."""
     print("\n[3/3] Glossaire (passe 2, LLM)")
@@ -751,27 +795,37 @@ def step_glossary(
     if consignes:
         print("  consignes-contexte.md lu")
 
-    existing: dict[str, str] = {}
+    existing: dict[str, dict] = {}
     if gloss_path.exists():
         with gloss_path.open(encoding="utf-8-sig", newline="") as f:
             for row in csv.DictReader(f):
                 if row.get("source"):
-                    existing[row["source"]] = row.get("target", "")
+                    existing[row["source"]] = dict(row)
         print(f"  {len(existing)} termes deja presents (conserves tels quels)")
 
     origin: dict[str, set] = {}
+    pages_src: dict[str, set] = {}
     found: dict[str, str] = {}
     total_pages = sum(len(pdf_pages(p)) for p in pdfs)
     fait = 0
+    # contexte du lot : la vue condensee de tous les documents
+    global_ctx = _resume_lot(ctxs)
+
     for pdf in pdfs:
         pages = pdf_pages(pdf)
-        # contexte par page : lu depuis contexte.md si dispo
+        # le contexte de CE pdf, et le resume de chaque page
+        ctx_pdf = next((c for c in ctxs if c.get("fichier") == pdf.name), {})
+        res_pages = ctx_pdf.get("pages", {})
         for n, txt in enumerate(pages, 1):
             fait += 1
             prog(fait, total_pages, f"{pdf.name} p{n}")
             if len(txt) < MIN_PAGE_CHARS:
                 continue
-            page_ctx = f"{pdf.name} page {n}"
+            page_ctx = (
+                f"{pdf.name} page {n} : {res_pages.get(str(n), '')}"
+                if res_pages.get(str(n))
+                else f"{pdf.name} page {n}"
+            )
             for part, ch in enumerate(chunks(txt), 1):
                 known = ", ".join(sorted(found)[:60]) or "(aucun)"
                 raw = llm(
@@ -793,6 +847,7 @@ def step_glossary(
                     if not src or not tgt or len(src) > 80:
                         continue
                     origin.setdefault(src, set()).add(pdf.name)
+                    pages_src.setdefault(src, set()).add(f"{pdf.name}:{n}")
                     if src in existing:
                         continue  # deja valide a la main -> jamais ecrase
                     if src in found:
@@ -802,14 +857,22 @@ def step_glossary(
                 if added:
                     print(f"    {pdf.name} p{n}: +{added}")
 
+    # un terme deja present garde son pdf d'origine, meme s'il reapparait ailleurs
+    def _fusion(src: str, ancien: str) -> str:
+        vus = set(filter(None, ancien.split("|")))
+        vus |= origin.get(src, set())
+        return "|".join(sorted(vus))
+
     rows, seen = [], set()
-    for src, tgt in existing.items():
+    for src, ligne in existing.items():
         rows.append(
             {
                 "source": src,
-                "target": tgt,
-                "tgt_lng": lang_out,
-                "source_pdf": "|".join(sorted(origin.get(src, set()))),
+                "target": ligne.get("target", ""),
+                "tgt_lng": ligne.get("tgt_lng", lang_out) or lang_out,
+                "source_pdf": _fusion(src, ligne.get("source_pdf", "")),
+                "pages": "|".join(sorted(pages_src.get(src, set()))),
+                "origine": ligne.get("origine") or "auto",
             }
         )
         seen.add(src)
@@ -821,10 +884,16 @@ def step_glossary(
                 "source": src,
                 "target": found[src],
                 "tgt_lng": lang_out,
-                "source_pdf": "|".join(sorted(origin.get(src, set()))),
+                "source_pdf": _fusion(src, ""),
+                "pages": "|".join(sorted(pages_src.get(src, set()))),
+                "origine": "auto",
             }
         )
-    write_csv(gloss_path, ["source", "target", "tgt_lng", "source_pdf"], rows)
+    write_csv(
+        gloss_path,
+        ["source", "target", "tgt_lng", "source_pdf", "pages", "origine"],
+        rows,
+    )
     print(f"  +{len(found)} nouveaux -> {gloss_path.name} ({len(rows)} lignes)")
 
 
@@ -951,6 +1020,19 @@ def main() -> int:
         ),
     )
     ap.add_argument("--no-download", action="store_true", help="ne pas chercher les polices sur le web")
+    ap.add_argument(
+        "--pdfs",
+        default=None,
+        help=(
+            "limiter aux PDFs dont le nom contient un de ces fragments "
+            "(separes par des virgules). Defaut : tous."
+        ),
+    )
+    ap.add_argument(
+        "--ignorer-contexte",
+        action="store_true",
+        help="recalculer le contexte meme si un fichier existe deja",
+    )
     a = ap.parse_args()
 
     etapes = {e.strip().lower() for e in a.etapes.split(",") if e.strip()}
@@ -995,6 +1077,10 @@ def main() -> int:
     src = Path(a.source) if a.source else projet / "source"
     work = Path(a.output) if a.output else projet / "analyse"
     pdfs = sorted(src.glob("*.pdf"))
+    if a.pdfs:
+        voulus = [m.strip() for m in a.pdfs.split(",") if m.strip()]
+        pdfs = [p for p in pdfs if any(v.lower() in p.name.lower() for v in voulus)]
+        print(f"selection : {len(pdfs)} PDF(s) sur {len(voulus)} motif(s)")
     if not pdfs:
         print(f"aucun PDF dans {src}", file=sys.stderr)
         print("depose tes PDFs dans source/ puis relance", file=sys.stderr)
@@ -1024,15 +1110,25 @@ def main() -> int:
     print(f"lot: {len(pdfs)} PDF(s) -> {work}")
     print(f"etapes : {', '.join(sorted(etapes))}")
 
-    # Le contexte nourrit la recherche de polices : on le calcule d'abord si
-    # les deux etapes sont demandees. Sinon on relit le fichier existant.
-    ctx = ""
+    # Le contexte nourrit les polices ET le glossaire : on le calcule d'abord
+    # si l'etape est demandee. Sinon on relit les fichiers JSON existants.
+    ctx_dir = work / "contexte"
+    if a.ignorer_contexte:
+        for f in ctx_dir.glob("*.json"):
+            f.unlink()
+        print("  contextes existants effaces (--ignorer-contexte)")
+
     if "contexte" in etapes:
-        ctx = step_context(pdfs, work, work / "contexte.md")
-    elif "polices" in etapes:
-        ctx_path = work / "contexte.md"
-        if ctx_path.exists():
-            ctx = ctx_path.read_text(encoding="utf-8")
+        ctxs = step_context(pdfs, work, ctx_dir)
+    else:
+        ctxs = [
+            c
+            for f in sorted(ctx_dir.glob("*.json"))
+            if not f.name.startswith("_")
+            and (c := _lire_contexte_pdf(f)) is not None
+        ]
+        if ctxs:
+            print(f"  {len(ctxs)} contexte(s) PDF relu(s)")
 
     if "polices" in etapes:
         step_fonts(
@@ -1041,13 +1137,13 @@ def main() -> int:
             work / "polices.csv",
             font_dir,
             auto_download=not a.no_download,
-            contexte=ctx,
+            contexte=_resume_lot(ctxs),
         )
     if "glossaire" in etapes:
-        step_glossary(pdfs, work, work / "glossaire.csv", ctx, a.lang_out)
+        step_glossary(pdfs, work, work / "glossaire.csv", ctxs, a.lang_out)
 
     print("\nTermine. A verifier/corriger :")
-    print(f"  {work/'contexte.md'}")
+    print(f"  {ctx_dir}  (un .json par PDF + _lot.json)")
     print(f"  {work/'glossaire.csv'}")
     print(f"  {work/'polices.csv'}")
     print(f"  {work/'polices'}  (depose tes .ttf ici)")

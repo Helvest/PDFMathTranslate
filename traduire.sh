@@ -34,6 +34,10 @@ LANG_IN="${PDF2ZH_LANG_IN:-en}"
 LANG_OUT="${PDF2ZH_LANG_OUT:-fr}"
 QPS="${PDF2ZH_QPS:-5}"
 TERM_QPS="${PDF2ZH_TERM_QPS:-5}"
+# Parallelisme interne : 5 workers = optimum mesure (2,9x). Le pool de termes
+# reste a 1 pour ne pas declencher de 429 sur l'extraction.
+POOL="${PDF2ZH_POOL:-5}"
+TERM_POOL="${PDF2ZH_TERM_POOL:-1}"
 GLOSSARY="${PDF2ZH_GLOSSARY:-$WORK/analyse/glossaire.csv}"
 
 if ! curl -sf "$PROXY/models" -H "Authorization: Bearer hermes" >/dev/null; then
@@ -65,6 +69,8 @@ for f in "${FILES[@]}"; do
     --auto-enable-ocr-workaround \
     --output "$WORK/traduits" \
     --qps "$QPS" \
+    --pool-max-workers "$POOL" \
+    --term-pool-max-workers "$TERM_POOL" \
     --min-text-length 2
 done
 
