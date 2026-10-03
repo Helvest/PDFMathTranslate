@@ -77,6 +77,20 @@ DOSSIERS_PROJET = ("source", "traduits", "downloads", "analyse", "analyse/police
 
 app = FastAPI(title="Traduction PDF")
 
+@app.middleware("http")
+async def _pas_de_cache(req, call_next):
+    """L'interface est rechargee en permanence pendant le developpement.
+
+    Sans cet entete, le navigateur garde un index.html perime : on teste alors
+    une version qui n'est plus celle du disque, et on cherche des bugs
+    inexistants (ou inversement, on rate de vrais bugs).
+    """
+    rep = await call_next(req)
+    if "text/html" in rep.headers.get("content-type", ""):
+        rep.headers["Cache-Control"] = "no-store, must-revalidate"
+    return rep
+
+
 # ---------------------------------------------------------------- etat
 
 # Etat des etapes par projet. En memoire : le serveur redemarre rarement et
@@ -1324,7 +1338,7 @@ def _proxy_actif() -> bool:
 # mesures. Le serveur ne fait que relayer — la logique reste testable seule.
 
 BANC: dict = {"etat": "pret", "log": "", "debut": None, "erreur": "",
-             "fait": 0, "total": 0}
+             "fait": 0, "total": 0, "etape": ""}
 
 
 @app.get("/api/banc/catalogue")
@@ -1531,14 +1545,21 @@ def api_banc_lancer(payload: dict):
             BANC["total"] = total
 
             def _prog(p):
-                # un banc dure plusieurs minutes : on montre ou on en est.
+                # un banc dure plusieurs minutes : on montre OU on en est.
                 # "fait" est global (tous modeles confondus), la barre suit.
                 BANC["fait"] = p.get("fait", BANC.get("fait", 0))
                 if "n_agents" in p:
-                    BANC["log"] = (f"{p['n_agents']} agents : {p['reussis']} "
-                                   f"en {p['total_s']}s, gain {p['gain']}x")
+                    # palier de charge : on nomme le modele et le palier
+                    BANC["etape"] = (f"{p.get('modele', '')} — "
+                                     f"{p['n_agents']} agents en meme temps")
+                    BANC["log"] = (f"{p.get('modele', '')} {p['n_agents']} agents "
+                                   f"/ {p['blocs']} blocs : {p['reussis']} en "
+                                   f"{p['total_s']}s, gain {p['gain']}x")
                 else:
-                    BANC["log"] = f"{p.get('etape', '')} — {p['fait']}/{p['total']}"
+                    # scenario : on nomme ce qu'on mesure
+                    BANC["etape"] = f"scenario {p.get('etape', '?')}"
+                    BANC["log"] = (f"{p['etape']} — {p['fait']}/{p['total']} "
+                                   f"mesures")
 
             r = banc.lancer(choisis, leviers, scenarios=scenarios,
                             timeout=timeout, repetitions=repetitions,

@@ -1656,33 +1656,55 @@ async function vueBanc(v, colTri) {
   try { d = await api("/banc/resultats"); }
   catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
 
-  // la charge est un banc a part : on la lit aussi, mais un echec ici ne doit
-  // pas masquer les resultats du banc normal
-  let charge = { niveaux: [], tenu: 0 };
+  // la charge est un banc a part : un echec ici ne doit pas masquer les
+  // resultats du banc normal
+  let charge = { modeles: [], tenu: 0 };
   try { charge = (await api("/banc/charge"))?.charge || charge; }
   catch (e) { /* pas de mesure de charge, tant pis */ }
 
+  // --- les declarations communes, dans l'ordre ou elles sont utilisees ---
+  // Ce que tu as choisi, conserve entre deux rendus : sans ca, decocher un
+  // modele re-rendait la page et remettait scenarios et effort a zero.
+  S.bancChoix = S.bancChoix || {};
+  const CHOIX = S.bancChoix;
+
+  const cat = S.bancCatalogue || { modeles: [], leviers: {} };
   S.banc = d;
+
+  // le modele AFFICHE : cliquer un nom change la fiche et les leviers sans
+  // cocher quoi que ce soit. Il pilote aussi le comparatif, donc il est calcule
+  // ici, une seule fois.
+  if (!CHOIX.vueInit) {
+    CHOIX.vueInit = true;
+    CHOIX.vue = S.options?.model || "stealth/space-bunny-alpha";
+  }
+  const vu = cat.modeles.find((m) => m.id === CHOIX.vue) || null;
+  const raisonne = vu
+    ? (vu.raisonnement_obligatoire || (vu.efforts || []).length > 0) : false;
+  // les niveaux de raisonnement du modele affiche. Si aucun modele n'est
+  // affiche, on prend ceux du modele du projet : le dropdown montre alors
+  // quelque chose plutot que d'etre mort.
+  const modelesNiveaux = vu ? (vu.efforts || [])
+    : Object.values(cat.leviers?.efforts_par_modele || {})[0] || [];
+
+  // les libelles, partages par le comparatif et les reponses brutes
+  const ETIQ = {traduction: "Traduction", glossaire: "Glossaire",
+                 contexte: "Contexte", polices: "Polices"};
+  const COURT = {traduction: "Trad", glossaire: "Glos",
+                 contexte: "Ctx", polices: "Poli"};
+
   const res = d.resultats || {};
   const etat = d.etat || {};
   const enCours = etat.etat === "en_cours";
 
-  // ce que tu as choisi, conserve entre deux rendus. Sans ca, decocher un
-  // modele re-rendait la page et remettait scenarios, effort et source a zero.
-  S.bancChoix = S.bancChoix || {};
-  const CHOIX = S.bancChoix;
-
+  // le bandeau, puis html — tout le reste s'y ajoute
   let html = `<div class="bloc">
     <h2 class="titre">Banc — global</h2>
     <p class="faible" style="margin:0 0 9px">
-      Mesure chaque modele sur nos <b>4 scenarios de production</b> : traduction,
-      glossaire, contexte, polices. Les prompts viennent du code de production,
-      donc ce que tu mesures ici est ce que le systeme fait vraiment.
-      ${res.maj ? `Dernier banc : ${echapper(res.maj)}.` : ""}</p>
-
+      Mesure chaque modele sur les scenarios de production. Les prompts
+      viennent du code de production : tu mesures ce que le systeme fait
+      vraiment.${res.maj ? ` Dernier banc : ${echapper(res.maj)}.` : ""}</p>
     <div class="rangee" style="margin-bottom:9px">
-      <button class="btn acc" id="b-lancer" ${enCours ? "disabled" : ""}>
-        ${enCours ? "Banc en cours…" : "Lancer le banc"}</button>
       ${enCours ? '<button class="btn danger" id="b-stop">Arreter</button>' : ""}
       <button class="btn" id="b-rafraichir">Rafraichir</button>
       <span class="faible">${res.modeles ? res.modeles.length : 0} resultat(s)</span>
@@ -1690,128 +1712,140 @@ async function vueBanc(v, colTri) {
     ${enCours ? `
       <div style="margin:7px 0 3px">
         <div class="barre-prog" title="Scenarios deja mesures">
-          <i style="width:${etat.total ? Math.min(100, (etat.fait / etat.total) * 100) : 0}%"></i>
+          <i style="width:${etat.total ? Math.min(100, ((etat.fait || 0) / etat.total) * 100) : 0}%"></i>
         </div>
         <p class="faible" style="margin:0 0 5px;font-size:10.5px">
           ${etat.fait || 0}/${etat.total || 0} mesures</p>
       </div>
       <div style="margin:3px 0">
-        <div class="barre-prog" title="Mesure en cours">
-          <i id="b-attente" style="width:100%"></i>
-        </div>
+        <p class="faible" style="margin:0 0 3px;font-size:11px">
+          <b>Test en cours</b> — ${echapper(etat.etape || "preparation")}
+          &nbsp;·&nbsp; etape ${etat.fait || 0} sur ${etat.total || 0}</p>
       </div>` : ""}
-    ${etat.log ? `<div class="log" id="log-banc" style="max-height:110px">${echapper(etat.log)}</div>` : ""}
+    ${etat.log ? `<div class="log" id="log-banc" style="max-height:110px">${
+      echapper(etat.log)}</div>` : ""}
     ${etat.erreur ? `<p class="vide">${echapper(etat.erreur)}</p>` : ""}
   </div>`;
 
-  // ---------- les leviers ----------
-  // Le modele choisi determine ce qui est disponible : on ne propose pas
-  // un effort a un modele qui n'en liste pas.
-  const cat = S.bancCatalogue || { modeles: [], leviers: {} };
-  // les modeles choisis, dans S.bancChoix — PAS dans le DOM : ce bloc s'ecrit
-  // avant que les cases a cocher n'existent, donc les lire ici donnait toujours
-  // zero modele, et le dropdown effort restait desactive au premier affichage
-  if (!CHOIX.modeles) CHOIX.modeles = [];
-  const ids = CHOIX.modeles;
-  const choisi = cat.modeles.find((m) => m.id === ids[0]);
-  const niveaux = choisi ? (choisi.efforts || []) : [];
-  // si aucun modele choisi, on prend le modele du projet : le dropdown montre
-  // alors les niveaux par defaut plutot que d'etre mort
-  const modelesNiveaux = choisi ? niveaux
-    : (cat.modeles.find((m) => m.id === (S.options?.model || ""))?.efforts
-       || Object.values(cat.leviers?.efforts_par_modele || {})[0] || []);
+  // ---------- les modeles ----------
+  // seulement les modeles gratuits : ce sont les seuls qui nous interessent,
+  // et 425 modeles a parcourir pour en trouver 3 n'aide personne
+  // on ne preselectionne qu'une fois. Si tu decoches TOUT, il faut que ca
+  // reste decoche : sinon decocher le dernier modele le recoche, ce qui rend
+  // impossible d'en selectionner aucun.
+  if (!CHOIX.modelesInit) {
+    CHOIX.modelesInit = true;
+    CHOIX.modeles = S.options?.model ? [S.options.model]
+      : ["stealth/space-bunny-alpha"];
+  }
+  const choisis = CHOIX.modeles || [];
+  const libres = (cat.modeles || []).filter((m) => m.gratuit);
 
   html += `<div class="bloc">
-    <h2 class="titre">Leviers de l'appel</h2>
-    <p class="faible" style="margin:0 0 8px">
-      Les reglages ci-dessous sont ceux que tu changes. Les autres parametres
-      supportes par le modele sont listes en dessous, en lecture seule.</p>
-    <div class="rangee">
-      <label class="rangee"><span class="faible">Effort de raisonnement</span>
-        <select id="b-effort" ${modelesNiveaux.length ? "" : "disabled"}>
-          <option value="auto">auto — celui de la production (${cat.leviers.effort || "low"})</option>
-          ${modelesNiveaux.map((e) => `<option value="${e}">${e}</option>`).join("")}
-        </select></label>
-      <label class="rangee"><span class="faible">Raisonnement</span>
-        <select id="b-raison">
-          <option value="1" ${CHOIX.raisonnement !== false ? "selected" : ""}>actif</option>
-          <option value="0" ${CHOIX.raisonnement === false ? "selected" : ""}>desactive</option>
-        </select></label>
-      <label class="rangee"><span class="faible">Tokens max</span>
-        <input type="number" id="b-maxtok" value="${cat.leviers.max_tokens || 16000}"
-               min="1000" max="200000" step="1000" style="width:104px"></label>
-      <label class="rangee"><span class="faible">Temperature</span>
-        <input type="number" id="b-temp" value="0" min="0" max="2" step="0.1"
-               style="width:70px"></label>
-      <label class="rangee"><span class="faible">Repetitions</span>
-        <input type="number" id="b-repet" value="3" min="1" max="10" step="1"
-               style="width:64px"></label>
-      <label class="rangee"><span class="faible">Timeout</span>
-              <input type="number" id="b-timeout" value="180" min="30" max="900" step="30"
-                     style="width:76px"></label>
-          </div>
-          <!-- les leviers avances : ils changent le fond de la reponse. Vides par
-               defaut, donc le modele choisit — sauf si tu les remplis. -->
-          <div class="rangee" style="margin-top:9px">
-            <label class="rangee"><span class="faible">Données de test</span>
-              <select id="b-source">
-                <option value="">Texte fixe — hors projet, comparable partout</option>
-                ${(S.projets || []).map((p) =>
-                  `<option value="${echapper(p.nom || p)}">Page d'un PDF du projet ${
-                    echapper(p.nom || p)}</option>`).join("")}
-              </select></label>
-          </div>
-          <details style="margin-top:8px">
-            <summary class="faible" style="cursor:pointer">Leviers avances</summary>
-            <label class="case" style="display:block;margin:7px 0">
-              <input type="checkbox" id="b-reasoning">
-              <span>include_reasoning — montrer le raisonnement dans la réponse
-                <span class="faible">— utile pour voir pourquoi il a choisi un
-                terme, mais ça allonge la sortie</span></span>
-            </label>
-            <div class="rangee" style="margin-top:7px">
-              <label class="rangee"><span class="faible">top_p</span>
-                <input type="number" id="b-topp" placeholder="aucun" min="0" max="1" step="0.05"
-                       style="width:88px"></label>
-              <label class="rangee"><span class="faible">seed</span>
-                <input type="number" id="b-seed" placeholder="aucun" step="1"
-                       style="width:88px"></label>
-              <label class="rangee"><span class="faible">repetition_penalty</span>
-                <input type="number" id="b-rep" placeholder="aucun" min="0.5" max="2" step="0.05"
-                       style="width:88px"></label>
-              <label class="rangee"><span class="faible">stop</span>
-                <input type="text" id="b-stopseq" placeholder="aucun" style="width:130px"></label>
-            </div>
-            <p class="faible" style="margin:6px 0 0;font-size:10.5px">
-              <b>seed</b> rend la reponse reproductible : deux bancs avec le meme seed
-              donnent le meme resultat. <b>stop</b> arrete la generation sur un texte.
-              <b>repetition_penalty</b> evite les boucles sur du JSON. Un levier vide
-              n'est pas envoye, et un levier que le modele ne supporte pas est
-              ecarte automatiquement.</p>
-          </details>
-    ${choisi ? `<details style="margin-top:9px">
-          <summary class="faible" style="cursor:pointer">
-            Ce que le proxy dit de ${echapper(choisi.id)}</summary>
-          <div class="fiche-modele">
-            <div><span class="faible">Nom</span> ${echapper(choisi.nom || "—")}</div>
-            <div><span class="faible">Contexte</span> ${choisi.contexte ? (choisi.contexte / 1000).toFixed(0) + "k" : "—"}</div>
-            <div><span class="faible">Sortie max</span> ${choisi.max_completion || "—"}</div>
-            <div><span class="faible">Raisonnement</span> ${choisi.raisonnement_obligatoire ? "obligatoire" : "optionnel"}</div>
-            <div><span class="faible">Effort par defaut</span> ${echapper(choisi.effort_defaut || "—")}</div>
-            <div><span class="faible">Gratuit</span> ${choisi.gratuit ? "oui" : "non"}</div>
-            <div><span class="faible">Modalites</span> ${(choisi.modalites || []).join(", ") || "—"}</div>
-            <div><span class="faible">Expire</span> ${echapper(choisi.expire || "—")}</div>
-            <div><span class="faible">Parametres</span> ${(choisi.parametres || []).map((p) => `<span class="pastille">${echapper(p)}</span>`).join(" ") || "—"}</div>
-            ${choisi.description ? `<div class="faible" style="margin-top:5px;font-size:10.5px">${echapper(choisi.description.slice(0, 300))}</div>` : ""}
-            <!-- tout ce que le proxy renvoie, brut : aliases, canonical_slug,
-                 knowledge_cutoff, default_parameters, pricing complet... -->
-            <details style="margin-top:7px">
-              <summary class="faible" style="cursor:pointer;font-size:10.5px">
-                Tout ce que le proxy renvoie, brut (${Object.keys(choisi.brut || {}).length} champs)</summary>
-              <pre class="brut-json">${echapper(JSON.stringify(choisi.brut || {}, null, 2))}</pre>
-            </details>
-          </div>
-        </details>` : ""}
+    <h2 class="titre">Modeles gratuits — ${libres.length}</h2>
+    <div class="rangee" style="margin-bottom:7px">
+      <input type="text" id="b-filtre" placeholder="filtrer…" style="flex:1;min-width:120px">
+      <button class="btn mini" id="b-gratuits">Tout cocher</button>
+      <button class="btn mini" id="b-aucun">Tout decocher</button>
+    </div>
+    <div class="scroll" style="max-height:230px;columns:2" id="b-liste">
+      ${libres.map((m) => `<div class="case ligne-mod" data-nom="${echapper(m.id.toLowerCase())}"
+          style="display:flex;gap:5px;align-items:center">
+        <input type="checkbox" data-mod="${echapper(m.id)}"
+          ${choisis.includes(m.id) ? "checked" : ""}
+          title="Cocher pour tester ce modele">
+        <span class="nom-mod" data-info-mod="${echapper(m.id)}"
+          style="font-size:11.5px;cursor:pointer;flex:1"
+          title="Cliquer pour voir ses details">${echapper(m.id)}
+          ${m.raisonnement_obligatoire
+            ? `<span class="pastille">${m.efforts ? "raisonnement" : "raisonnem. fixe"}</span>`
+            : '<span class="pastille warn">sans raisonnement</span>'}</span>
+      </div>`).join("")}
+    </div>
+  </div>`;
+
+  // ---------- la fiche du modele et ses leviers ----------
+
+  html += `<div class="bloc">
+    <h2 class="titre">${vu ? echapper(vu.id) : "Aucun modele affiche"}
+      ${vu && !vu.raisonnement_obligatoire
+        ? '<span class="pastille warn">sans raisonnement</span>' : ""}</h2>
+    ${vu ? `
+      <div class="fiche-modele" style="margin-bottom:9px">
+        <div><span class="faible">Nom</span> ${echapper(vu.nom || "—")}</div>
+        <div><span class="faible">Contexte</span> ${
+          vu.contexte ? (vu.contexte / 1000).toFixed(0) + "k" : "—"}</div>
+        <div><span class="faible">Sortie max</span> ${vu.max_completion || "—"}</div>
+        <div><span class="faible">Raisonnement</span> ${
+          vu.raisonnement_obligatoire ? "obligatoire" : "possible"}</div>
+        ${!vu.raisonnement_obligatoire ? `<div><span class="faible">Niveaux</span>
+          aucun — ce modele ne raisonne pas</div>` : ""}
+        <div><span class="faible">Parametres</span> ${
+          (vu.parametres || []).map((p) => `<span class="pastille">${echapper(p)}</span>`).join(" ")
+          || "—"}</div>
+      </div>
+
+      <p class="faible" style="margin:0 0 7px"><b>Leviers</b> — ce que cet
+        appel peut regler. Ceux que le modele ne supporte pas ne sont pas
+        proposes.</p>
+      <div class="rangee">
+        ${raisonne ? `
+          <label class="rangee"><span class="faible">Effort</span>
+            <select id="b-effort" ${modelesNiveaux.length ? "" : "disabled"}
+              <option value="auto">auto — celui de la production (${
+                cat.leviers.effort || "low"})</option>
+              ${modelesNiveaux.map((e) => `<option value="${e}">${e}</option>`).join("")}
+            </select></label>
+          <label class="rangee"><span class="faible">Raisonnement</span>
+            <select id="b-raison">
+              <option value="1" ${CHOIX.raisonnement !== false ? "selected" : ""}>actif</option>
+              <option value="0" ${CHOIX.raisonnement === false ? "selected" : ""}>desactive</option>
+            </select></label>
+          <label class="rangee"><span class="faible">include_reasoning</span>
+            <select id="b-reasoning">
+              <option value="0" ${CHOIX.include_reasoning ? "" : "selected"}>masque</option>
+              <option value="1" ${CHOIX.include_reasoning ? "selected" : ""}>visible</option>
+            </select></label>` : `
+          <p class="faible" style="margin:0">
+            Ce modele ne raisonne pas : ni effort, ni raisonnement, ni
+            include_reasoning. Seul <code>temperature</code> s'applique.</p>`}
+        <label class="rangee"><span class="faible">Tokens max</span>
+          <input type="number" id="b-maxtok" value="${CHOIX.max_tokens || cat.leviers.max_tokens || 16000}"
+                 min="1000" max="200000" step="1000" style="width:100px"></label>
+        <label class="rangee"><span class="faible">Temperature</span>
+          <input type="number" id="b-temp" value="${CHOIX.temperature ?? 0}"
+                 min="0" max="2" step="0.1" style="width:74px"></label>
+        <label class="rangee"><span class="faible">Repetitions</span>
+          <input type="number" id="b-repet" value="${CHOIX.repetitions || 3}"
+                 min="1" max="10" step="1" style="width:64px"></label>
+        <label class="rangee"><span class="faible">Timeout</span>
+          <input type="number" id="b-timeout" value="${CHOIX.timeout || 180}"
+                 min="30" max="900" step="30" style="width:76px"></label>
+      </div>
+
+      <details style="margin-top:9px">
+        <summary class="faible" style="cursor:pointer">Leviers avances</summary>
+        <div class="rangee" style="margin-top:7px">
+          <label class="rangee"><span class="faible">top_p</span>
+            <input type="number" id="b-topp" placeholder="aucun" min="0" max="1" step="0.05"
+                   style="width:84px"></label>
+          <label class="rangee"><span class="faible">seed</span>
+            <input type="number" id="b-seed" placeholder="aucun" step="1"
+                   style="width:84px"></label>
+          <label class="rangee"><span class="faible">repetition_penalty</span>
+            <input type="number" id="b-rep" placeholder="aucun" min="0.5" max="2" step="0.05"
+                   style="width:84px"></label>
+          <label class="rangee"><span class="faible">stop</span>
+            <input type="text" id="b-stopseq" placeholder="aucun" style="width:130px"></label>
+        </div>
+      </details>
+
+      <details style="margin-top:7px">
+        <summary class="faible" style="cursor:pointer">
+          Ce que le proxy renvoie, brut (${Object.keys(vu.brut || {}).length} champs)</summary>
+        <pre class="brut-json">${echapper(JSON.stringify(vu.brut || {}, null, 2))}</pre>
+      </details>`
+    : `<p class="vide">Clique le nom d'un modele pour voir ses details.</p>`}
   </div>`;
 
   // ---------- les scenarios ----------
@@ -1832,6 +1866,8 @@ async function vueBanc(v, colTri) {
       Dans l'ordre du pipeline. Decoche ce que tu ne veux pas mesurer —
       le banc va plus vite.</p>
     <div class="rangee" style="margin-bottom:7px">
+      <button class="btn acc" id="b-lancer" ${enCours ? "disabled" : ""}>
+        ${enCours ? "Test en cours…" : "Demarrer les tests"}</button>
       <button class="btn mini" id="b-sc-tous">Tous</button>
       <button class="btn mini" id="b-sc-aucun">Aucun</button>
     </div>
@@ -1841,35 +1877,44 @@ async function vueBanc(v, colTri) {
     </label>`).join("")}
   </div>`;
 
-  // ---------- les modeles ----------
-  // seulement les modeles gratuits : ce sont les seuls qui nous interessent,
-  // et 425 modeles a parcourir pour en trouver 3 n'aide personne
-  // on ne preselectionne qu'une fois. Si tu decoches TOUT, il faut que ca
-  // reste decoche : sinon decocher le dernier modele le recoche, ce qui rend
-  // impossible d'en selectionner aucun.
-  if (!CHOIX.modelesInit) {
-    CHOIX.modelesInit = true;
-    CHOIX.modeles = S.options?.model ? [S.options.model]
-      : ["stealth/space-bunny-alpha"];
-  }
-  const choisis = CHOIX.modeles || [];
-  const libres = (cat.modeles || []).filter((m) => m.gratuit);
+  // ---------- la charge ----------
+  // Un tableau par modele mesure : c'est la charge qui dit combien d'agents
+  // chacun encaisse, donc c'est une comparaison, pas une mesure unique.
+  const cr = charge.modeles || [];
   html += `<div class="bloc">
-    <h2 class="titre">Modeles gratuits — ${libres.length}</h2>
-    <div class="rangee" style="margin-bottom:7px">
-      <input type="text" id="b-filtre" placeholder="filtrer…" style="flex:1;min-width:120px">
-      <button class="btn mini" id="b-gratuits">Tout cocher</button>
-      <button class="btn mini" id="b-aucun">Tout decocher</button>
+    <h2 class="titre">Charge — combien d'agents en meme temps</h2>
+    <p class="faible" style="margin:0 0 7px">
+      Mesure chaque modele coche, du plus petit palier au plus grand. Le test
+      s'arrete au premier palier qui perd un appel : au-dela, on se dispute
+      le service. Le gain compare au sequentiel.</p>
+    <div class="rangee" style="margin-bottom:8px">
+      <label class="rangee"><span class="faible">Paliers</span>
+        <input type="text" id="c-niveaux" value="${CHOIX.paliers || "1, 2, 3, 4, 6, 8, 12, 16, 24"}"
+               style="width:170px"></label>
+      <button class="btn acc" id="c-lancer" ${enCours ? "disabled" : ""}>
+        ${enCours ? "Mesure en cours…" : "Mesurer la charge"}</button>
     </div>
-    <div class="scroll" style="max-height:230px;columns:2" id="b-liste">
-      ${libres.map((m) => `<label class="case" data-nom="${echapper(m.id.toLowerCase())}">
-        <input type="checkbox" data-mod="${echapper(m.id)}"
-          ${choisis.includes(m.id) ? "checked" : ""}>
-        <span style="font-size:11.5px">${echapper(m.id)}
-          ${m.gratuit ? '<span class="pastille ok">gratuit</span>' : ""}
-          ${m.raisonnement_obligatoire ? `<span class="pastille">${m.efforts ? "raisonnement" : "raisonnement fixe"}</span>` : ""}</span>
-      </label>`).join("")}
-    </div>
+    ${cr.length ? cr.map((x) => `
+      <div style="margin-bottom:11px">
+        <div style="font-size:11.5px;margin-bottom:3px">
+          <b>${echapper(x.modele)}</b> — plafond
+          <b style="color:var(--ok)">${x.tenu} agents</b> sans perte
+          <span class="faible">(mesuré ${echapper(x.maj || "")})</span></div>
+        <div class="scroll-tab"><table>
+          <tr><th>Agents</th><th>Blocs</th><th>Reussis</th><th>Temps</th>
+              <th>Gain</th><th>Tronques</th><th>Termes</th></tr>
+          ${(x.niveaux || []).map((n) => `<tr>
+            <td>${n.n_agents}</td>
+            <td class="faible">${n.blocs}</td>
+            <td class="${n.nb_ok === n.blocs ? "" : "alerte"}">${echapper(n.reussis)}</td>
+            <td>${n.total_s}s</td>
+            <td${n.gain >= 2 ? ' style="color:var(--ok)"' : ""}>${n.gain ?? "—"}x</td>
+            <td class="${n.tronques ? "alerte" : "faible"}">${n.tronques}</td>
+            <td class="faible">${n.termes}</td>
+          </tr>`).join("")}
+        </table></div>
+      </div>`).join("")
+    : `<p class="vide">Pas encore de mesure de charge.</p>`}
   </div>`;
 
   // ---------- le tableau croise ----------
@@ -1880,9 +1925,6 @@ async function vueBanc(v, colTri) {
     html += `<div class="bloc"><p class="vide">Aucun resultat. Coche un modele et lance le banc.</p></div>`;
   } else {
     const scens = S.bancScenarios || [];
-    const ETIQ = {traduction: "Traduction", glossaire: "Glossaire",
-                   contexte: "Contexte", polices: "Polices"};
-    const COURT = {traduction: "Trad", glossaire: "Glos", contexte: "Ctx", polices: "Poli"};
     const lignes = _trierBanc(res.modeles, colTri || _triBanc.col);
 
     html += `<div class="bloc">
@@ -1951,46 +1993,6 @@ async function vueBanc(v, colTri) {
       }).join("")).join("")}
     </div>`;
   }
-
-  // ---------- la charge ----------
-  // Un tableau par modele mesure : c'est la charge qui dit combien d'agents
-  // chacun encaisse, donc c'est une comparaison, pas une mesure unique.
-  const cr = charge.modeles || [];
-  html += `<div class="bloc">
-    <h2 class="titre">Charge — combien d'agents en meme temps</h2>
-    <p class="faible" style="margin:0 0 7px">
-      Mesure chaque modele coche, du plus petit palier au plus grand. Le test
-      s'arrete au premier palier qui perd un appel : au-dela, on se dispute
-      le service. Le gain compare au sequentiel.</p>
-    <div class="rangee" style="margin-bottom:8px">
-      <label class="rangee"><span class="faible">Paliers</span>
-        <input type="text" id="c-niveaux" value="${CHOIX.paliers || "1, 2, 3, 4, 6, 8, 12, 16, 24"}"
-               style="width:170px"></label>
-      <button class="btn acc" id="c-lancer" ${enCours ? "disabled" : ""}>
-        ${enCours ? "Mesure en cours…" : "Mesurer la charge"}</button>
-    </div>
-    ${cr.length ? cr.map((x) => `
-      <div style="margin-bottom:11px">
-        <div style="font-size:11.5px;margin-bottom:3px">
-          <b>${echapper(x.modele)}</b> — plafond
-          <b style="color:var(--ok)">${x.tenu} agents</b> sans perte
-          <span class="faible">(mesuré ${echapper(x.maj || "")})</span></div>
-        <div class="scroll-tab"><table>
-          <tr><th>Agents</th><th>Blocs</th><th>Reussis</th><th>Temps</th>
-              <th>Gain</th><th>Tronques</th><th>Termes</th></tr>
-          ${(x.niveaux || []).map((n) => `<tr>
-            <td>${n.n_agents}</td>
-            <td class="faible">${n.blocs}</td>
-            <td class="${n.nb_ok === n.blocs ? "" : "alerte"}">${echapper(n.reussis)}</td>
-            <td>${n.total_s}s</td>
-            <td${n.gain >= 2 ? ' style="color:var(--ok)"' : ""}>${n.gain ?? "—"}x</td>
-            <td class="${n.tronques ? "alerte" : "faible"}">${n.tronques}</td>
-            <td class="faible">${n.termes}</td>
-          </tr>`).join("")}
-        </table></div>
-      </div>`).join("")
-    : `<p class="vide">Pas encore de mesure de charge.</p>`}
-  </div>`;
 
   v.innerHTML = html;
 
@@ -2103,11 +2105,19 @@ async function vueBanc(v, colTri) {
       l.style.display = l.dataset.nom.includes(q) ? "" : "none";
     });
   });
-  // cocher un modele : on enregistre le choix puis on re-rend. Le choix est
-  // dans CHOIX, pas dans le DOM — sinon le re-rendu l'effacerait.
+  // deux gestes distincts, sinon on ne peut pas consulter sans selectionner :
+  //   la case  selectionne le modele pour le test
+  //   le nom    affiche ses details et ses leviers
   v.querySelectorAll("[data-mod]").forEach((c) =>
     c.addEventListener("change", () => {
       CHOIX.modeles = [...v.querySelectorAll("[data-mod]:checked")].map((x) => x.dataset.mod);
+      // decocher le modele affiche ne le decoche pas : on garde la fiche
+      vueBanc(v);
+    }));
+  v.querySelectorAll("[data-info-mod]").forEach((el) =>
+    el.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      CHOIX.vue = el.dataset.infoMod;
       vueBanc(v);
     }));
 }
