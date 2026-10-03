@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pymupdf
 
+import base
 import catalogue_polices as catalogue
 
 logger = logging.getLogger(__name__)
@@ -58,13 +59,6 @@ def projet_courant() -> Path | None:
 DOSSIER_TTF_DEFAUT: Path | None = None  # calcule a l'appel (le projet peut changer)
 
 
-def chemins(projet: Path | None = None) -> tuple[Path, Path]:
-    """(csv, dossier des TTF) pour un projet. (None, None) si aucun projet."""
-    p = projet or projet_courant()
-    if p is None:
-        return Path(), Path()
-    return p / "analyse" / "polices.csv", p / "analyse" / "polices"
-
 # Extensions acceptees pour un fichier de remplacement.
 EXTS = (".ttf", ".otf")
 
@@ -84,6 +78,33 @@ class PoliceCustom:
     italic: bool
     serif: bool
     monospace: bool
+
+
+def _mapping_global(con) -> list[dict]:
+    """Les remplacements declares dans Global/polices.csv.
+
+    C'est le seul CSV qui subsiste : il est partage entre tous les projets et
+    modifie a la main. L'etat.db du projet prime — une ligne de la base sans
+    remplacement n'est pas un choix, donc le global peut la completer.
+    """
+    csv_global = catalogue.CSV_GLOBAL
+    if not csv_global.is_file():
+        return []
+    out = []
+    try:
+        with csv_global.open(encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                nom = (row.get("police_origine") or "").strip()
+                fichier = (row.get("remplacement") or "").strip()
+                if nom and fichier:
+                    out.append({
+                        "police_origine": nom,
+                        "remplacement": fichier,
+                        "famille": (row.get("famille") or "").strip(),
+                    })
+    except (OSError, csv.Error) as e:
+        logger.warning("mapping global illisible : %s", e)
+    return out
 
 
 def _resoudre(fichier: str, dossier: Path) -> Path | None:
@@ -124,66 +145,48 @@ def _encoding_length(font: pymupdf.Font) -> int:
 
 
 def charger(
-    csv_path: Path | str | None = None,
-    dossier_ttf: Path | str | None = None,
     projet: Path | None = None,
+    dossier_ttf: Path | str | None = None,
 ) -> dict[str, PoliceCustom]:
-    """Charge le mapping. Retourne {nom_origine: PoliceCustom}.
+    """Le mapping de remplacement, lu dans etat.db.
 
-    Sans chemin explicite, on prend le projet courant (PDF2ZH_PROJET, sinon le
-    premier trouve). Les lignes sans remplacement sont ignorees (detection auto
-    de BabelDOC). Un fichier introuvable est signale et ignore, jamais fatal.
+    Retourne {police_origine: PoliceCustom}. Les polices sans remplacement
+    sont ignorees : c'est la detection automatique de BabelDOC qui s'en
+    charge. Un fichier introuvable est signale et ignore, jamais fatal.
+
+    Le choix vient du projet si la base en porte un, sinon du global :
+    modifier Global/polices.csv change donc tous les projets qui n'ont pas
+    de decision propre.
     """
-    if csv_path is None or dossier_ttf is None:
-        csv_defaut, ttf_defaut = chemins(projet)
-        csv_path = csv_path or csv_defaut
-        dossier_ttf = dossier_ttf or ttf_defaut
-
-    csv_path = Path(csv_path)
+    proj = projet or projet_courant()
+    if proj is None:
+        return {}
+    if dossier_ttf is None:
+        dossier_ttf = proj / "analyse" / "polices"
     dossier_ttf = Path(dossier_ttf)
 
-    if not csv_path.is_file() and not catalogue.CSV_GLOBAL.is_file():
-        logger.debug("aucun mapping de polices")
-        return {}
-    if not csv_path.is_file():
-        # pas de mapping projet : on prendra celui du global
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        csv_path.write_text(
-            "police_origine,remplacement,origine,propose,raison,famille,spans,pages,pdfs\n",
-            encoding="utf-8-sig",
-        )
-
-    # Le mapping se lit en cascade : une entree du projet gagne, sinon celle
-    # du global. Modifier Global/polices.csv change donc tous les projets qui
-    # n'ont pas d'entree propre.
     lignes: list[dict] = []
-    with csv_path.open(encoding="utf-8-sig", newline="") as f:
-        lignes = list(csv.DictReader(f))
-
-    # Une ligne du projet SANS remplacement ne compte pas comme un choix : elle
-    # signifie "pas encore decide". Le global doit pouvoir la completer. Seules
-    # les lignes avec un remplacement effectif bloquent la cascade.
-    connus = {
-        (l.get("police_origine") or "").strip()
-        for l in lignes
-        if (l.get("remplacement") or l.get("fichier_remplacement") or "").strip()
-    }
-    if catalogue.CSV_GLOBAL.is_file() and catalogue.CSV_GLOBAL != csv_path:
-        try:
-            with catalogue.CSV_GLOBAL.open(encoding="utf-8-sig", newline="") as f:
-                for l in csv.DictReader(f):
-                    if (l.get("police_origine") or "").strip() not in connus:
-                        lignes.append(l)
-        except (OSError, csv.Error) as e:
-            logger.warning("mapping global illisible : %s", e)
+    try:
+        with base.connecter(proj) as con:
+            lignes = [
+                dict(r) for r in con.execute(
+                    "SELECT police_origine, remplacement, famille FROM police"
+                    " WHERE remplacement <> ''")
+            ]
+            for g in _mapping_global(con):
+                # le projet gagne : une ligne sans remplacement n'est pas un choix
+                lignes.append(dict(g))
+    except base.BaseInvalide as e:
+        logger.warning("base illisible (%s) — polices par defaut", e)
+        return {}
+    except Exception as e:  # noqa: BLE001 - ne jamais bloquer une traduction
+        logger.warning("mapping illisible (%s) — polices par defaut", e)
+        return {}
 
     resultat: dict[str, PoliceCustom] = {}
     for ligne in lignes:
         nom = (ligne.get("police_origine") or "").strip()
-        # la colonne s'appelle 'remplacement' (ancien nom : fichier_remplacement)
-        fichier = (
-            ligne.get("remplacement") or ligne.get("fichier_remplacement") or ""
-        ).strip()
+        fichier = (ligne.get("remplacement") or "").strip()
         if not nom or not fichier:
             continue
 
@@ -191,9 +194,7 @@ def charger(
         if chemin is None:
             logger.warning(
                 "police introuvable pour %s : %s (cherche dans %s)",
-                nom,
-                fichier,
-                dossier_ttf,
+                nom, fichier, dossier_ttf,
             )
             continue
 
@@ -224,37 +225,40 @@ def charger(
 
 def _auto_test() -> int:
     """Verifie le chargement sur le mapping reel du projet."""
-    projet = projet_courant()
-    if projet is None:
-        print(f"aucun projet dans {PROJETS}")
-        print("cree-en un :  analyser.py --projet <nom> --creer")
+    proj = projet_courant()
+    if proj is None:
+        print(f"aucun projet")
         return 0
 
-    csv_defaut, ttf_defaut = chemins(projet)
-    print(f"projet  : {projet.name}")
-    print(f"mapping : {csv_defaut}")
-    print(f"dossier : {ttf_defaut}")
-
-    if not csv_defaut.is_file():
-        print("  (pas de polices.csv -> rien a tester)")
+    print(f"projet  : {proj.name}")
+    base_f = base.chemin_base(proj)
+    print(f"base    : {base_f}")
+    if not base_f.is_file():
+        print("  (pas encore de base -> rien a tester)")
         return 0
+
+    with base.connecter(proj) as con:
+        total = con.execute("SELECT COUNT(*) FROM police").fetchone()[0]
+        choisi = con.execute(
+            "SELECT COUNT(*) FROM police WHERE remplacement <> ''").fetchone()[0]
+    print(f"  {total} police(s) detectee(s), {choisi} avec remplacement")
 
     polices = charger()
     print(f"\n{len(polices)} police(s) chargee(s) :")
-    for nom, p in sorted(polices.items()):
+    for nom, pc in sorted(polices.items()):
         print(
-            f"  {nom:26} -> {p.chemin.name:26} "
-            f"asc={p.ascent:+.3f} desc={p.descent:+.3f} "
-            f"enc={p.encoding_length} bold={int(p.bold)} italic={int(p.italic)}"
+            f"  {nom:26} -> {pc.chemin.name:26} "
+            f"asc={pc.ascent:+.3f} desc={pc.descent:+.3f} "
+            f"enc={pc.encoding_length} bold={int(pc.bold)} italic={int(pc.italic)}"
         )
 
     # controle : les valeurs doivent etre exploitables par BabelDOC
-    for nom, p in polices.items():
-        assert p.chemin.is_file(), f"{nom}: fichier absent"
-        assert p.encoding_length in (1, 2), f"{nom}: encoding_length invalide"
-        assert -2.0 < p.descent < 0, f"{nom}: descent hors plage ({p.descent})"
-        assert 0 < p.ascent < 2.0, f"{nom}: ascent hors plage ({p.ascent})"
-        assert p.font.glyph_count > 0, f"{nom}: aucune glyphe"
+    for nom, pc in polices.items():
+        assert pc.chemin.is_file(), f"{nom}: fichier absent"
+        assert pc.encoding_length in (1, 2), f"{nom}: encoding_length invalide"
+        assert -2.0 < pc.descent < 0, f"{nom}: descent hors plage ({pc.descent})"
+        assert 0 < pc.ascent < 2.0, f"{nom}: ascent hors plage ({pc.ascent})"
+        assert pc.font.glyph_count > 0, f"{nom}: aucune glyphe"
 
     print("\nOK : toutes les valeurs sont dans les plages attendues")
     return 0
