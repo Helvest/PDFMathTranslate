@@ -651,6 +651,290 @@ def api_projet(nom: str):
     }
 
 
+# ---------------------------------------------------------------- api metier
+#
+# Ces routes lisent et ecrivent etat.db. Tout passe par la base : plus de
+# CSV, plus de JSON a synchroniser.
+
+def _base(nom: str):
+    """(projet, connexion). Erreur claire si la base est absente ou cassee."""
+    import base as _b
+
+    p = _projet(nom)
+    if not p.is_dir():
+        raise HTTPException(404, "projet introuvable")
+    try:
+        return p, _b.connecter(p)
+    except _b.BaseInvalide as e:
+        raise HTTPException(500, str(e)) from e
+
+
+@app.get("/api/projets/{nom}/pdfs")
+def api_pdfs(nom: str):
+    """Tous les PDF connus : presents ET absents.
+
+    Un PDF absent garde son entree et ses donnees ; c'est l'utilisateur qui
+    decide de l'ignorer ou de le purger.
+    """
+    import registre
+
+    p, ctx = _base(nom)
+    with ctx as con:
+        registre.synchroniser(con, p)
+        presents = (
+            sorted(x.name for x in (p / "source").glob("*.pdf"))
+            if (p / "source").is_dir() else []
+        )
+        out = []
+        for r in con.execute("SELECT * FROM pdf ORDER BY nom"):
+            out.append({
+                "nom": r["nom"],
+                "etat": r["etat"],
+                "mode": r["mode"],
+                "empreinte": (r["empreinte"] or "")[:12],
+                "anciens": json.loads(r["ancien_noms"] or "[]"),
+                "present": r["nom"] in presents,
+                "recalculer": None if r["recalculer"] is None else bool(r["recalculer"]),
+                "contexte": con.execute(
+                    "SELECT 1 FROM contexte WHERE pdf_id = ?", (r["id"],)
+                ).fetchone() is not None,
+            })
+        return {
+            "pdfs": out,
+            "reassociations": {
+                nom_actuel: ancien
+                for nom_actuel, (_id, ancien) in registre.reassociations(con).items()
+            },
+            "sur_disque": presents,
+        }
+
+
+@app.get("/api/projets/{nom}/compteurs")
+def api_compteurs(nom: str):
+    """Les compteurs pour la banniere et les pastilles des onglets."""
+    import donnees
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        return donnees.compter(con)
+
+
+@app.get("/api/projets/{nom}/glossaire")
+def api_glossaire(nom: str, orphelins: int = 0):
+    """Tous les termes, avec leurs sources et leurs pages.
+
+    ?orphelins=1 ne renvoie que les termes dont plus aucun PDF source n'existe.
+    """
+    import donnees
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        return donnees.lister_termes(con, orphelins_seulement=bool(orphelins))
+
+
+@app.put("/api/projets/{nom}/glossaire")
+def api_ecrire_glossaire(nom: str, payload: dict):
+    """Enregistre les termes modifies depuis l'interface.
+
+    Les cibles editees a la main passent en origine='manuel' : elles ne
+    seront jamais ecrasees par une re-analyse.
+    """
+    import donnees
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        n = 0
+        for t in payload.get("termes") or []:
+            source = (t.get("source") or "").strip()
+            cible = (t.get("target") or "").strip()
+            if not source:
+                continue
+            donnees.upsert_terme(con, source, cible, t.get("tgt_lng") or "fr", "manuel")
+            n += 1
+        return {"ok": True, "enregistres": n}
+
+
+@app.delete("/api/projets/{nom}/glossaire/{terme_id}")
+def api_supprimer_terme(nom: str, terme_id: int):
+    """Supprime un terme. Definitif : l'interface confirme avant."""
+    _p, ctx = _base(nom)
+    with ctx as con:
+        cur = con.execute("DELETE FROM glossaire WHERE id = ?", (terme_id,))
+        if not cur.rowcount:
+            raise HTTPException(404, "terme introuvable")
+        return {"ok": True}
+
+
+@app.post("/api/projets/{nom}/glossaire/purger-orphelins")
+def api_purger_orphelins(nom: str):
+    """Efface les termes dont plus aucun PDF source n'existe.
+
+   .appelee apres une confirmation qui detaillant le nombre.
+    """
+    import donnees
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        n = donnees.purger_termes_orphelins(con)
+        return {"ok": True, "supprimes": n}
+
+
+@app.get("/api/projets/{nom}/polices")
+def api_polices(nom: str, orphelines: int = 0):
+    """Toutes les polices, avec leur usage par PDF."""
+    import donnees
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        return donnees.lister_polices(con, orphelines_seulement=bool(orphelines))
+
+
+@app.put("/api/projets/{nom}/polices")
+def api_ecrire_polices(nom: str, payload: dict):
+    """Enregistre les remplacements choisis dans l'interface."""
+    import donnees
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        n = 0
+        for x in payload.get("polices") or []:
+            origine = (x.get("police_origine") or "").strip()
+            if not origine:
+                continue
+            donnees.upsert_police(
+                con, origine, (x.get("remplacement") or "").strip(),
+                x.get("origine") or "manuel", x.get("propose") or "",
+                x.get("raison") or "", x.get("famille") or "",
+            )
+            n += 1
+        return {"ok": True, "enregistres": n}
+
+
+@app.post("/api/projets/{nom}/polices/purger-orphelines")
+def api_purger_polices_orphelines(nom: str):
+    import donnees
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        n = donnees.purger_polices_orphelines(con)
+        return {"ok": True, "supprimes": n}
+
+
+@app.post("/api/projets/{nom}/pdf/mode")
+def api_mode_pdf(nom: str, payload: dict):
+    """Change le mode d'un PDF : inclus ou ignore.
+
+    Un PDF ignore reste dans source/ et garde ses donnees ; il est seulement
+    exclu des prochaines analyses.
+    """
+    import registre
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        nom_pdf = (payload.get("nom") or "").strip()
+        mode = (payload.get("mode") or "").strip()
+        if mode not in {"inclus", "ignore"}:
+            raise HTTPException(400, "mode doit etre 'inclus' ou 'ignore'")
+        if not any(r["nom"] == nom_pdf for r in con.execute("SELECT nom FROM pdf")):
+            raise HTTPException(404, "PDF inconnu du registre")
+        registre.definir_mode(con, nom_pdf, mode)
+        return {"ok": True, "nom": nom_pdf, "mode": mode}
+
+
+@app.post("/api/projets/{nom}/pdf/renommer")
+def api_renommer_pdf(nom: str, payload: dict):
+    """Renomme un PDF et son entree de registre.
+
+    Tout ce qui etait rattache suit : les tables referencent des id.
+    """
+    import base as _b
+    import registre
+
+    p, ctx = _base(nom)
+    ancien = (payload.get("ancien") or "").strip()
+    nouveau = (payload.get("nouveau") or "").strip()
+    if not ancien or not nouveau:
+        raise HTTPException(400, "ancien et nouveau sont requis")
+    if not re.fullmatch(r".+\.pdf", nouveau, re.IGNORECASE):
+        raise HTTPException(400, "le nouveau nom doit finir par .pdf")
+
+    src = p / "source" / ancien
+    if src.is_file():
+        src.rename(p / "source" / nouveau)
+
+    with ctx as con:
+        row = _b.pdf_par_nom(con, ancien)
+        if row is None:
+            raise HTTPException(404, "PDF inconnu du registre")
+        try:
+            _b.renommer_pdf(con, int(row["id"]), nouveau)
+        except _b.Doublon as e:
+            raise HTTPException(409, f"le nom '{nouveau}' est deja pris") from e
+    return {"ok": True, "nom": nouveau}
+
+
+@app.post("/api/projets/{nom}/pdf/rattacher")
+def api_rattacher_pdf(nom: str, payload: dict):
+    """Le PDF 'nouveau' reprend l'identite de l'ancien : ses donnees suivent."""
+    import registre
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        nouveau = (payload.get("nouveau") or "").strip()
+        ancien_id = payload.get("ancien_id")
+        try:
+            registre.rattacher(con, nouveau, int(ancien_id))
+        except KeyError as e:
+            raise HTTPException(404, f"PDF introuvable : {e}") from e
+        return {"ok": True}
+
+
+@app.get("/api/projets/{nom}/pdf/{fichier}/apercu-purge")
+def api_apercu_purge(nom: str, fichier: str):
+    """Ce que la suppression de ce PDF ferait perdre. Affiche AVANT.
+
+    La suppression est definitive : mieux vaut voir.
+    """
+    import registre
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        return registre.pdf_a_purger(con, fichier)
+
+
+@app.post("/api/projets/{nom}/pdf/supprimer-donnees")
+def api_supprimer_donnees(nom: str, payload: dict):
+    """Supprime le CONTEXTE de ce PDF, et uniquement lui.
+
+    Ses termes de glossaire et ses polices ne sont pas touches : ils peuvent
+    venir d'autres PDF, et deviendront orphelins si besoin.
+    """
+    import registre
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        try:
+            return registre.supprimer_donnees(con, (payload.get("nom") or "").strip())
+        except KeyError as e:
+            raise HTTPException(404, f"PDF introuvable : {e}") from e
+
+
+@app.post("/api/projets/{nom}/pdf/supprimer-entree")
+def api_supprimer_entree(nom: str, payload: dict):
+    """Supprime la FICHE du PDF. Ses donnees deviennent orphelines.
+
+    Definitif : l'interface a montre l'apercu avant.
+    """
+    import registre
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        try:
+            return registre.supprimer_entree(con, (payload.get("nom") or "").strip())
+        except KeyError as e:
+            raise HTTPException(404, f"PDF introuvable : {e}") from e
+
+
 @app.get("/api/projets/{nom}/fichier/{cle}")
 def api_lire_fichier(nom: str, cle: str):
     if cle not in FICHIERS_EDITABLES:
