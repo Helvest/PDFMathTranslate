@@ -1332,8 +1332,112 @@ async function vuePdfs(v) {
   html += `</table>
     <p class="faible" style="margin-top:8px">
       Les cases sont enregistrees avec les <b>Options</b>. Aucune cochee = tout le lot.</p>
-  </div><div class="bloc" id="zone-comp"></div>`;
+  </div>
+  <div class="bloc" id="zone-reg"></div>
+  <div class="bloc" id="zone-pages"></div>
+  <div class="bloc" id="zone-comp"></div>`;
   v.innerHTML = html;
+
+  // --- registre : les PDF connus, presents ET absents
+  const reg = await api(`/projets/${nom}/pdfs`).catch(() => ({ pdfs: [], reassociations: {} }));
+  if (reg.pdfs.length) {
+    const zoneR = v.querySelector("#zone-reg");
+    let r = `<div class="rangee" style="margin-bottom:7px">
+        <h2 class="titre" style="margin:0">Registre — ${reg.pdfs.length} PDF connu(s)</h2>
+      </div>`;
+
+    // renommages proposes : un PDF absent et un nouveau de meme empreinte
+    const props = Object.entries(reg.reassociations || {});
+    if (props.length) {
+      r += `<div class="rangee" style="margin-bottom:9px">
+        <span class="faible">Contenu identique, nom différent :</span>` +
+        props.map(([nouveau, ancien]) =>
+          `<span class="tag manuel">${echapper(nouveau)}</span>
+           <button class="btn mini acc" data-reassoc="${echapper(nouveau)}"
+             title="Réassocier à ${echapper(ancien)}">→ ${echapper(ancien)}</button>`).join("") +
+        `</div>`;
+    }
+
+    r += `<table><tr>
+      <th>PDF</th><th>Présence</th><th>Analyser</th>
+      <th>Renommé depuis</th><th></th></tr>`;
+    for (const x of reg.pdfs) {
+      const absent = x.etat === "absent";
+      r += `<tr${absent ? ' style="opacity:.6"' : ""}>
+        <td>${echapper(x.nom)}</td>
+        <td>${absent ? '<span class="faible">absent du dossier</span>'
+                     : '<span style="color:var(--ok)">présent</span>'}</td>
+        <td><label class="case" style="margin:0">
+          <input type="checkbox" data-mode="${echapper(x.nom)}"
+            ${x.mode === "ignore" ? "" : "checked"}>
+          <span class="faible">inclure</span></label></td>
+        <td class="faible" style="font-size:11px">${echapper((x.anciens || []).join(", "))}</td>
+        <td class="rangee">
+          <button class="btn mini" data-rename="${echapper(x.nom)}">renommer</button>
+          <button class="btn mini danger" data-purge="${echapper(x.nom)}"
+            ${absent ? "" : "disabled"}
+            title="Supprimer la fiche et ses données — définitif">purger</button>
+        </td></tr>`;
+    }
+    r += `</table>
+      <p class="faible" style="margin-top:7px">
+        Un PDF décoché garde ses données, il est juste exclu des prochaines analyses.
+        Un PDF supprimé du dossier reste listé ici, avec ce qu'il a produit.</p>`;
+    zoneR.innerHTML = r;
+
+    zoneR.querySelectorAll("[data-mode]").forEach((c) =>
+      c.addEventListener("change", async () => {
+        try {
+          await api(`/projets/${nom}/pdf/mode`, { method: "POST", body: JSON.stringify({
+            nom: c.dataset.mode, mode: c.checked ? "inclus" : "ignore" }) });
+          notif(c.checked ? "Sera analysé" : "Ignoré — données conservées");
+        } catch (e) { notif(e.message, true); }
+      }));
+
+    zoneR.querySelectorAll("[data-rename]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        const ancien = b.dataset.rename;
+        const nouveau = prompt("Nouveau nom (le contexte et les termes suivent) :", ancien);
+        if (!nouveau || nouveau === ancien) return;
+        try {
+          await api(`/projets/${nom}/pdf/renommer`, { method: "POST",
+            body: JSON.stringify({ ancien, nouveau }) });
+          notif("Renommé"); chargerProjet(S.actif); vuePdfs(v);
+        } catch (e) { notif(e.message, true); }
+      }));
+
+    zoneR.querySelectorAll("[data-reassoc]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        const nouveau = b.dataset.reassoc;
+        const ancien = reg.reassociations[nouveau];
+        try {
+          const ids = await api(`/projets/${nom}/pdfs`);
+          const cible = (ids.pdfs || []).find((x) => x.nom === nouveau);
+          await api(`/projets/${nom}/pdf/rattacher`, { method: "POST",
+            body: JSON.stringify({ nouveau, ancien_id: cible ? cible.id : null }) });
+          notif("Réassocié"); chargerProjet(S.actif); vuePdfs(v);
+        } catch (e) { notif(e.message, true); }
+      }));
+
+    zoneR.querySelectorAll("[data-purge]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        const nomPdf = b.dataset.purge;
+        const ap = await api(`/projets/${nom}/pdf/${encodeURIComponent(nomPdf)}/apercu-purge`);
+        const html = `<p style="margin:0 0 8px">La fiche de
+          <b>${echapper(nomPdf)}</b> et ses données seront
+          <b>supprimées définitivement</b>.</p>
+          <div class="faible">${ap.contexte ? `contexte : ${ap.pages_contexte} page(s)<br>` : ""}
+          ${ap.termes ? `${ap.termes} terme(s) du glossaire<br>` : ""}
+          ${ap.polices ? `${ap.polices} police(s)<br>` : ""}
+          ${!ap.contexte && !ap.termes && !ap.polices ? "(rien à perdre)" : ""}</div>`;
+        if (!await confirmer("Purger ce PDF", html, "Purger")) return;
+        try {
+          await api(`/projets/${nom}/pdf/supprimer-entree`, { method: "POST",
+            body: JSON.stringify({ nom: nomPdf }) });
+          notif("Purgé"); chargerProjet(S.actif); vuePdfs(v);
+        } catch (e) { notif(e.message, true); }
+      }));
+  }
 
   const sauverSel = async () => {
     const a = [], t = [];

@@ -688,6 +688,7 @@ def api_pdfs(nom: str):
         out = []
         for r in con.execute("SELECT * FROM pdf ORDER BY nom"):
             out.append({
+                "id": r["id"],
                 "nom": r["nom"],
                 "etat": r["etat"],
                 "mode": r["mode"],
