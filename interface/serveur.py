@@ -60,8 +60,10 @@ DOSSIER_CONTEXTE = "analyse/contexte"
 OPTIONS_DEFAUT = {
     "lang_in": "en",
     "lang_out": "fr",
-    "model": "inclusionai/ling-3.0-flash-sante:free",
-    "term_model": "meituan/longcat-2.5-preview:free",
+    # space-bunny-alpha repond toujours et supporte json_object (verifie).
+    # Les modeles gratuits epuisent leur quota (429) ; celui-ci ne l'a pas.
+    "model": "stealth/space-bunny-alpha",
+    "term_model": "stealth/space-bunny-alpha",
     "qps": 5,
     "term_qps": 5,
     "pool_max_workers": 5,
@@ -1280,8 +1282,15 @@ def api_bench_modeles():
     except Exception as e:
         return {"modeles": [], "erreur": f"proxy injoignable ({type(e).__name__})"}
 
+    # Tous les modeles, pas seulement les ":free" : space-bunny-alpha n'a pas
+    # de suffixe gratuit et repond meme quand les quotas gratuits sont epuises.
     noms = sorted(m.get("id", "") for m in d.get("data", []))
-    return {"modeles": [n for n in noms if n.endswith(":free")], "erreur": ""}
+    gratuits = [n for n in noms if n.endswith(":free")]
+    return {
+        "modeles": noms,
+        "gratuits": gratuits,
+        "erreur": "",
+    }
 
 
 @app.get("/api/bench/resultats")

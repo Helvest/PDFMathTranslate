@@ -24,11 +24,11 @@ V2="$ROOT/pdf2zh/kernel/PDFMathTranslate-next.git/.venv/Scripts/pdf2zh_next.exe"
 # patche le FontMapper de BabelDOC. PDF2ZH_NO_FONTS=1 pour desactiver.
 export PYTHONPATH="$ROOT${PYTHONPATH:+;$PYTHONPATH}"
 
-MODEL="${PDF2ZH_MODEL:-inclusionai/ling-3.0-flash-sante:free}"
+MODEL="${PDF2ZH_MODEL:-stealth/space-bunny-alpha}"
 # Extraction de glossaire : longcat-2.5, seul modele gratuit qui supporte
 # response_format=json_object (ling-sante renvoie HTTP 400). L'extracteur
 # demande request_json_mode=True (automatic_term_extractor.py:331).
-TERM_MODEL="${PDF2ZH_TERM_MODEL:-meituan/longcat-2.5-preview:free}"
+TERM_MODEL="${PDF2ZH_TERM_MODEL:-stealth/space-bunny-alpha}"
 PROXY="${PDF2ZH_PROXY:-http://127.0.0.1:8645/v1}"
 LANG_IN="${PDF2ZH_LANG_IN:-en}"
 LANG_OUT="${PDF2ZH_LANG_OUT:-fr}"

@@ -772,58 +772,60 @@ function echecsModeles() {
   return out;
 }
 
-// --- options ---
-// Liste deroulante des modeles, avec les chiffres du dernier bench en aide.
-function listeModeles(cle, libelle, aide = "") {
+// Un <select> de 425 modeles est inutilisable : on prend un champ texte
+// avec suggestions, et on affiche le modele choisi.
+function champModele(cle, libelle, aide = "") {
   const o = S.options || {};
   const courant = o[cle] ?? "";
-  // performances mesurees, si on les a
-  const perf = new Map();
-  const confs = S.bench?.configs || {};
-  for (const [nomConf, lignes] of Object.entries(confs)) {
-    for (const l of lignes || []) {
-      if (!l.lat_moy_s) continue;
-      const p = perf.get(l.modele) || { lat: [], tok: [] };
-      p.lat.push(l.lat_moy_s);
-      if (l.tok_sortie_moy) p.tok.push(l.tok_sortie_moy);
-      perf.set(l.modele, p);
-    }
-  }
+  const perf = perfModeles();
+
+  const suggestion = (q) => {
+    const t = q.trim().toLowerCase();
+    if (!t) return S.modeles.slice(0, 20);
+    return S.modeles.filter((m) => m.toLowerCase().includes(t)).slice(0, 20);
+  };
   const detail = (m) => {
     const p = perf.get(m);
     if (!p) return "";
     const lat = (p.lat.reduce((a, b) => a + b, 0) / p.lat.length).toFixed(1);
-    const tok = p.tok.length ? " · " + Math.round(p.tok.reduce((a, b) => a + b, 0) / p.tok.length) + " tok" : "";
-    return `${lat}s${tok}`;
+    const tok = p.tok.length
+      ? " · " + Math.round(p.tok.reduce((a, b) => a + b, 0) / p.tok.length) + " tok"
+      : "";
+    const echec = echecsModeles().get(m);
+    return echec ? `✕ ${echec}` : `${lat}s${tok}`;
   };
 
-  // Un modele qui n'a jamais reussi est signale, avec la raison. On le garde
-  // visible : l'utilisateur doit comprendre POURQUOI il echoue plutot que
-  // croire a une erreur de sa part.
-  const echecs = echecsModeles();
+  const d = S.modeles.find((m) => m === courant);
+  return `<label class="champ" data-champ="${echapper(cle)}">
+    <span>${libelle}${aide ? " — " + aide : ""}</span>
+    <input type="text" data-opt="${echapper(cle)}" value="${echapper(courant)}"
+      list="liste-${echapper(cle)}" placeholder="nom exact du modèle"
+      autocomplete="off">
+    <datalist id="liste-${echapper(cle)}">
+      ${suggestion(courant).map((m) =>
+        `<option value="${echapper(m)}">${echapper(detail(m))}</option>`).join("")}
+    </datalist>
+    <span class="faible" data-info="${echapper(cle)}">
+      ${d ? (detail(d) || "aucune mesure") : "modèle hors liste du proxy"}
+    </span>
+  </label>`;
+}
 
-  const options = S.modeles.length
-    ? S.modeles.map((m) => {
-        const d = detail(m);
-        const e = echecs.get(m);
-        if (e) {
-          return `<option value="${echapper(m)}" disabled`
-            + ` title="Echec au dernier test : ${echapper(e)}">`
-            + `${echapper(m)}  ✕ ${echapper(e)}</option>`;
-        }
-        return `<option value="${echapper(m)}" ${m === courant ? "selected" : ""}>`
-          + `${echapper(m)}${d ? "  —  " + d : ""}</option>`;
-      }).join("")
-    // le modele courant n'est pas forcement dans la liste : on le garde
-    : (courant ? `<option value="${echapper(courant)}" selected>${echapper(courant)}</option>` : "");
-
-  const nMorts = [...echecs.keys()].filter((m) => S.modeles.includes(m)).length;
-  return `<label class="champ"><span>${libelle}${aide ? " — " + aide : ""}</span>
-    <select data-opt="${cle}" style="width:100%">${options}</select>
-    ${nMorts ? `<span class="faible" style="color:var(--erreur)">
-      ${nMorts} modele(s) en echec au dernier test — selectionnes impossibles</span>` : ""}
-    ${S.modelesErreur ? `<span class="faible" style="color:var(--erreur)">
-      ${echapper(S.modelesErreur)} — liste indisponible</span>` : ""}</label>`;
+// --- options ---
+// Liste deroulante des modeles, avec les chiffres du dernier bench en aide.
+// Les mesures du dernier bench, par modele : {modele: {lat: [...], tok: [...]}}
+function perfModeles() {
+  const out = new Map();
+  for (const lignes of Object.values(S.bench?.configs || {})) {
+    for (const l of lignes || []) {
+      if (!l.lat_moy_s) continue;
+      const p = out.get(l.modele) || { lat: [], tok: [] };
+      p.lat.push(l.lat_moy_s);
+      if (l.tok_sortie_moy) p.tok.push(l.tok_sortie_moy);
+      out.set(l.modele, p);
+    }
+  }
+  return out;
 }
 
 async function vueOptions(v) {
@@ -841,10 +843,9 @@ async function vueOptions(v) {
       <h2 class="titre">Langues et modeles</h2>
       ${champ("lang_in", "Langue source")}
       ${champ("lang_out", "Langue cible")}
-      ${listeModeles("model", "Modele de traduction",
-          "le plus rapide et fiable sur nos textes")}
-      ${listeModeles("term_model", "Modele d'extraction de glossaire",
-          "doit supporter response_format json_object")}
+      ${champModele("model", "Modèle de traduction", "celui qui répond le mieux")}
+      ${champModele("term_model", "Modèle d'extraction de glossaire",
+          "doit supporter json_object")}
     </div>
     <div class="bloc">
       <h2 class="titre">Debit et parallelisme</h2>
@@ -866,6 +867,27 @@ async function vueOptions(v) {
     </div>
     <p class="faible" style="margin-top:10px">
       La selection des PDFs se fait dans l'onglet <b>PDFs</b>.</p>`;
+
+  // au fur et a mesure de la frappe : on rafraichit les suggestions et l'info
+  v.querySelectorAll("[data-champ]").forEach((champ) => {
+    const cle = champ.dataset.champ;
+    const inp = champ.querySelector("[data-opt]");
+    const info = champ.querySelector("[data-info]");
+    const liste = champ.querySelector("datalist");
+    inp.addEventListener("input", () => {
+      const q = inp.value.trim().toLowerCase();
+      const t = q ? S.modeles.filter((m) => m.toLowerCase().includes(q)).slice(0, 20)
+                  : S.modeles.slice(0, 20);
+      liste.innerHTML = t.map((m) => `<option value="${echapper(m)}"></option>`).join("");
+      const perf = perfModeles();
+      const p = perf.get(inp.value);
+      info.textContent = p
+        ? `${(p.lat.reduce((a, b) => a + b, 0) / p.lat.length).toFixed(1)}s`
+        : (echecsModeles().get(inp.value)
+            ? `échec au dernier test : ${echecsModeles().get(inp.value)}`
+            : "");
+    });
+  });
 
   v.querySelector("#sv-options").addEventListener("click", async () => {
     const out = { ...S.options };

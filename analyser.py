@@ -37,7 +37,9 @@ PROXY = os.environ.get("PDF2ZH_PROXY", "http://127.0.0.1:8645/v1")
 API_KEY = os.environ.get("PDF2ZH_KEY", "hermes")
 # ling-sante : le plus rapide, sort du JSON valide sans response_format
 # (il ne supporte PAS response_format=json_object -> HTTP 400).
-MODEL = os.environ.get("PDF2ZH_MODEL", "inclusionai/ling-3.0-flash-sante:free")
+# Modele par defaut. Un projet peut en choisir un autre : options.json est
+# lu a chaque run, donc l'onglet Options compte vraiment.
+MODEL = os.environ.get("PDF2ZH_MODEL", "")
 
 # Au dela, une page est decoupee en morceaux (le LLM perd le fil sur du long texte).
 CHUNK_CHARS = 5000
@@ -48,13 +50,58 @@ TIMEOUT = 300
 # ---------------------------------------------------------------- LLM
 
 
+def _projet_courant() -> Path:
+    """Le projet : PDF2ZH_PROJET, sinon le premier trouve. None si aucun."""
+    projets = Path(__file__).resolve().parent.parent / "Projets"
+    nom = os.environ.get("PDF2ZH_PROJET")
+    if nom:
+        p = projets / nom
+        if p.is_dir():
+            return p
+    if projets.is_dir():
+        for d in sorted(projets.iterdir()):
+            if d.is_dir() and not d.name.startswith("."):
+                return d
+    return Path(".")
+
+
+def _modele_du_projet(projet: Path) -> str:
+    """Le modele a utiliser : env > options.json du projet > defaut.
+
+    Sans ca, changer le modele dans l'interface n'aurait aucun effet sur
+    l'analyse : MODEL etait fige au chargement du module.
+    """
+    env = os.environ.get("PDF2ZH_MODEL")
+    if env:
+        return env
+    f = projet / "options.json"
+    if f.is_file():
+        try:
+            import json as _j
+
+            m = (_j.loads(f.read_text(encoding="utf-8")).get("model") or "").strip()
+            if m:
+                return m
+        except (OSError, ValueError):
+            pass
+    return MODELE_DEFAUT
+
+
+# Les modeles gratuits epuisent leur quota (HTTP 429). space-bunny-alpha repond
+# et supporte json_object : c'est lui qui sert par defaut.
+MODELE_DEFAUT = "stealth/space-bunny-alpha"
+MODEL = MODELE_DEFAUT
+
 def llm(prompt: str) -> str:
     """Un appel au proxy Hermes. Retourne le texte, chaine vide si echec."""
     body = json.dumps(
         {
-            "model": MODEL,
+            "model": _modele_du_projet(_projet_courant()),
             "messages": [{"role": "user", "content": prompt}],
-            "reasoning_effort": "none",
+            # space-bunny-alpha exige une reflexion active : sans ce parametre
+            # il repond 400 ("Reasoning is mandatory"). Les modeles gratuits,
+            # eux, le refusent — d'ou le defaut explicite plutot que l'absence.
+            "reasoning": {"enabled": True},
         }
     ).encode()
     req = urllib.request.Request(
@@ -65,7 +112,14 @@ def llm(prompt: str) -> str:
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             d = json.load(r)
-        return (d["choices"][0]["message"].get("content") or "").strip()
+        msg = d["choices"][0]["message"]
+        # la reflexion peut deborder dans content : on ne garde que le texte
+        contenu = (msg.get("content") or "").strip()
+        if isinstance(msg.get("reasoning"), str):
+            r = msg["reasoning"].strip()
+            if r and contenu.startswith(r):
+                contenu = contenu[len(r):].strip()
+        return contenu
     except urllib.error.HTTPError as e:
         print(f"    ! HTTP {e.code}: {e.read().decode()[:120]}", file=sys.stderr)
     except Exception as e:
