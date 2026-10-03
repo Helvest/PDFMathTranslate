@@ -38,7 +38,30 @@ TERM_QPS="${PDF2ZH_TERM_QPS:-5}"
 # reste a 1 pour ne pas declencher de 429 sur l'extraction.
 POOL="${PDF2ZH_POOL:-5}"
 TERM_POOL="${PDF2ZH_TERM_POOL:-1}"
-GLOSSARY="${PDF2ZH_GLOSSARY:-$WORK/analyse/glossaire.csv}"
+# BabelDOC ne lit qu'un CSV de glossaire (glossary.py : source, target,
+# target_language). C'est le SEUL endroit ou un CSV existe : on l'exporte
+# depuis etat.db au dernier moment, et il est supprime a la fin. Aucune
+# divergence possible entre la base et ce que voit le translateur.
+GLOSSARY="${PDF2ZH_GLOSSARY:-${TMPDIR:-/tmp}/glossaire-$$.csv}"
+PY="$ROOT/.venv/Scripts/python.exe"
+
+# nettoyer le CSV temporaire, meme en cas d'interruption
+trap 'rm -f "$GLOSSARY"' EXIT
+
+export_glossaire() {
+  "$PY" -c "
+import sys
+sys.path.insert(0, r'$ROOT')
+from pathlib import Path
+import base, donnees
+proj = base.projet()
+if proj is None:
+    sys.exit('aucun projet')
+with base.connecter(proj) as con:
+    donnees.exporter_glossaire_csv(con, Path(sys.argv[1]))
+print(f'glossaire exporte : {sys.argv[1]}')
+" "$GLOSSARY" || { echo "ERREUR: export du glossaire impossible"; exit 1; }
+}
 # Extraction automatique du glossaire : DESACTIVEE par defaut. Elle produit des
 # entrees source == cible qui forcent la non-traduction et degradent le rendu.
 # PDF2ZH_GLOSSAIRE_AUTO=1 la reactive si on le souhaite.
@@ -55,6 +78,27 @@ if [ ${#FILES[@]} -eq 0 ]; then
   FILES=("$WORK/source"/*.pdf)
 fi
 
+# le glossaire n'est exporte que s'il y a des termes : sinon BabelDOC
+# recevrait un fichier vide, ce qui est inutile
+NB_TERMES="$("$PY" -c "
+import sys
+sys.path.insert(0, r'$ROOT')
+import base
+proj = base.projet()
+if proj is None:
+    print(0)
+else:
+    with base.connecter(proj) as con:
+        print(con.execute('SELECT COUNT(*) FROM glossaire WHERE target <> \'\'').fetchone()[0])
+" 2>/dev/null || echo 0)"
+
+if [ "$NB_TERMES" -gt 0 ]; then
+  export_glossaire
+else
+  echo "(glossaire vide : pas d'export)"
+  GLOSSARY=""
+fi
+
 for f in "${FILES[@]}"; do
   echo "=== $(basename "$f") ==="
   "$V2" "$f" \
@@ -68,7 +112,7 @@ for f in "${FILES[@]}"; do
     --lang-out "$LANG_OUT" \
     --no-dual \
         $([ "$GLOSSAIRE_AUTO" = "1" ] || echo "--no-auto-extract-glossary") \
-        --glossaries "$GLOSSARY" \
+        ${GLOSSARY:+--glossaries "$GLOSSARY"} \
     --watermark-output-mode no_watermark \
     --auto-enable-ocr-workaround \
     --output "$WORK/traduits" \
