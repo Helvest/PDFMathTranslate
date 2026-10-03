@@ -1347,6 +1347,12 @@ def api_banc_catalogue():
             "effort": EFFORT,
             "max_tokens": MAX_TOKENS,
             "temperature": 0,
+            "avances": {
+                "top_p": "aucun — laisse le modele choisir",
+                "seed": "aucun — reponse non reproductible",
+                "stop": "aucun — laisse la reponse se terminer",
+                "repetition_penalty": "aucun",
+            },
             "efforts_par_modele": {
                 m["id"]: m["efforts"] for m in modeles if m["efforts"]
             },
@@ -1365,10 +1371,25 @@ def _leviers(payload: dict, modele: dict, banc) -> dict:
     effort = payload.get("effort")
     if effort in (None, "", "auto"):
         effort = banc.effort_serieux(modele)
+    def _nombre(cle: str, defaut=None):
+        """Un champ vide depuis un formulaire est "", pas 0 ni None."""
+        v = payload.get(cle)
+        if v in (None, ""):
+            return defaut
+        try:
+            return float(v) if "." in str(v) else int(v)
+        except (TypeError, ValueError):
+            return defaut
+
     return {
         "effort": effort,
-        "max_tokens": int(payload.get("max_tokens") or MAX_TOKENS),
-        "temperature": payload.get("temperature", 0),
+        "max_tokens": int(_nombre("max_tokens") or MAX_TOKENS),
+        "temperature": _nombre("temperature", 0),
+        # ces trois-la changent le fond de la reponse
+        "top_p": _nombre("top_p"),
+        "seed": _nombre("seed"),
+        "stop": payload.get("stop") or None,
+        "repetition_penalty": _nombre("repetition_penalty"),
     }
 
 

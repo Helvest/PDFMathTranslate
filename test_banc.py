@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -93,14 +94,14 @@ def test_catalogue_complet() -> None:
         if not entree:
             manquants.append(f"{m.get('id')} absent du catalogue")
             continue
-        for champ in m:
-            # tout doit se retrouver, soit dans un champ renomme, soit dans
-            # le modele complet conserve tel quel
-            if champ in entree:
-                continue
-            if champ in (entree.get("brut") or {}):
-                continue
-            manquants.append(f"{m['id']}.{champ}")
+        # "brut" doit etre le modele du proxy, champ pour champ : ni perdu,
+        # ni invente
+        brut = entree.get("brut") or {}
+        for champ, valeur in m.items():
+            if champ not in brut:
+                manquants.append(f"{m['id']}.{champ} absent")
+            elif brut[champ] != valeur:
+                manquants.append(f"{m['id']}.{champ} modifie")
 
     _verifie(not manquants,
              f"{len(manquants)} champ(s) perdus : {', '.join(manquants[:8])}")
@@ -138,6 +139,57 @@ def test_leviers() -> None:
                           {"effort": "low", "temperature": 0}, "p")
     _verifie("reasoning" not in c3,
              "reasoning envoye a un modele qui ne le supporte pas")
+
+
+def test_leviers_supports() -> None:
+    """Les leviers annoncés doivent etre envoyes, les autres jamais.
+
+    Le proxy accepte 27 parametres. On n'en regle que quelques-uns, mais ce
+    qu'on regle doit partir : c'est ce que l'utilisateur a demande en cochant
+    une case.
+    """
+    modele = {"id": "x/y", "efforts": ["low"], "raisonnement_obligatoire": True,
+              "parametres": ["max_tokens", "temperature", "top_p", "seed",
+                             "stop", "repetition_penalty"]}
+
+    c = banc._construire(modele, {
+        "effort": "low", "max_tokens": 4000, "temperature": 0,
+        "top_p": 0.9, "seed": 42, "stop": "FIN", "repetition_penalty": 1.1}, "p")
+    _verifie(c["top_p"] == 0.9, f"top_p non envoye : {c.get('top_p')}")
+    _verifie(c["seed"] == 42, f"seed non envoye : {c.get('seed')}")
+    _verifie(c["stop"] == "FIN", f"stop non envoye : {c.get('stop')}")
+    _verifie(c["repetition_penalty"] == 1.1,
+             f"repetition_penalty non envoye : {c.get('repetition_penalty')}")
+
+    # un levier non renseigne ne doit pas apparaitre, meme si on l'a coche vide
+    c2 = banc._construire(modele, {"effort": "low", "top_p": None, "seed": ""}, "p")
+    _verifie("top_p" not in c2, "top_p vide envoye quand meme")
+    _verifie("seed" not in c2, "seed vide envoye quand meme")
+
+    # un parametre que le modele ne supporte pas ne doit JAMAIS partir :
+    # le routeur refuse la requete entiere
+    c3 = banc._construire({"id": "z", "efforts": [], "raisonnement_obligatoire": False,
+                           "parametres": ["max_tokens", "temperature"]},
+                          {"seed": 42, "top_p": 0.9, "temperature": 0}, "p")
+    _verifie("seed" not in c3,
+             "seed envoye a un modele qui ne le supporte pas : requete refusee")
+    _verifie("top_p" not in c3, "top_p envoye a un modele qui ne le supporte pas")
+
+    # un modele qui ne liste rien ne peut pas etre verifie : on laisse passer
+    # plutot que de tout refuser, sinon le banc ne mesurerait rien
+    c4 = banc._construire({"id": "y", "efforts": [], "raisonnement_obligatoire": False,
+                           "parametres": []},
+                          {"seed": 7, "temperature": 0}, "p")
+    _verifie(c4.get("seed") == 7,
+             "un modele sans liste de parametres doit quand meme recevoir seed")
+
+    # les leviers doivent etre castes : un seed "42" depuis un formulaire
+    c5 = banc._construire(modele, {"seed": "42", "max_tokens": "4000",
+                                   "temperature": 0}, "p")
+    _verifie(c5["seed"] == 42 and isinstance(c5["seed"], int),
+             f"seed non converti en entier : {c5['seed']!r}")
+    _verifie(c5["max_tokens"] == 4000 and isinstance(c5["max_tokens"], int),
+             f"max_tokens non converti : {c5['max_tokens']!r}")
 
 
 # ---------------------------------------------------------------- qualite
@@ -363,6 +415,56 @@ def test_reseau_charge() -> None:
                  f"gain {r['gain']}x impossible avec {r['n_agents']} agents")
 
 
+def test_reprise_reponse_vide() -> None:
+    """Le proxy rend parfois une reponse VIDE : il faut reessayer.
+
+    Mesure : 1 appel sur 8 rend finish_reason=stop avec une sortie vide, sans
+    erreur et avec les tokens rapportes. Sans reprise, un huitieme du glossaire
+    manque en silence — c'est ce qui faisait 3/4 au lieu de 4/4.
+
+    On teste appeler() en patchant la vraie reference qu'il utilise
+    (banc.urllib.request.urlopen), sinon le test appelle le proxy reel.
+    """
+    import io
+    import threading
+
+    scenarios = [
+        {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+        {"choices": [{"message": {"content": '[{"src": "A", "tgt": "B"}]'},
+                      "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 10, "completion_tokens": 20}},
+    ]
+    lock = threading.Lock()
+    appels: list[int] = []
+
+    class _FauxProxy:
+        def __call__(self, req, timeout=None):
+            with lock:
+                d = scenarios[min(len(appels), len(scenarios) - 1)]
+                appels.append(1)
+            return io.BytesIO(json.dumps(d).encode())
+
+    modele = {"id": "x/y", "efforts": ["low"],
+              "raisonnement_obligatoire": True,
+              "parametres": ["max_tokens", "temperature"]}
+    leviers = {"effort": "low", "max_tokens": 100, "temperature": 0}
+
+    vrai = banc.urllib.request.urlopen
+    banc.urllib.request.urlopen = _FauxProxy()
+    try:
+        r = banc.appeler(modele, "p", leviers, timeout=5)
+    finally:
+        banc.urllib.request.urlopen = vrai
+
+    _verifie(len(appels) == 2,
+             f"il fallait 2 appels pour une reponse vide, obtenu {len(appels)}")
+    _verifie(r.get("essais") == 2,
+             f"la reprise n'a pas ete comptabilisee : {r.get('essais')}")
+    _verifie(bool(r.get("sortie")), "la reprise a rendu une reponse vide encore")
+    _verifie(not r.get("vide"), "la reponse de la reprise est signalee vide")
+
+
 def test_leviers_api() -> None:
     """"auto" est un mot du menu, jamais une valeur d'API.
 
@@ -373,13 +475,16 @@ def test_leviers_api() -> None:
     # serveur.py vit dans interface/ : sans ce chemin le test se sautait
     # silencieusement, ce qui est pire qu'un echec visible
     racine = Path(__file__).resolve().parent
-    sys.path.insert(0, str(racine / "interface"))
-    sys.path.insert(0, str(racine))
-    try:
-        import serveur
-    except Exception as e:  # noqa: BLE001
-        ERREURS.append(f"serveur non importable : {e}")
-        return
+    # _leviers est la seule logique de resolution des leviers cote serveur.
+    # On la teste ici sans importer serveur : serveur.py tire fastapi/pydantic,
+    # qui cassent hors du venv du projet — et un test qui depend de
+    # l'environnement est un test qui finit par ne rien verifier.
+    src_serveur = (racine / "interface" / "serveur.py").read_text(encoding="utf-8")
+    ns: dict = {"MAX_TOKENS": 16000}
+    debut = src_serveur.index("def _leviers(")
+    fin = src_serveur.index("\n@app.", debut)
+    exec(compile(src_serveur[debut:fin], "serveur._leviers", "exec"), ns)
+    _leviers = ns["_leviers"]
 
     modele = {"id": "x/y", "efforts": ["low", "max"], "raisonnement_obligatoire": True}
     class _B:
@@ -388,19 +493,19 @@ def test_leviers_api() -> None:
             return "low"
 
     for valeur in ("auto", "", None):
-        lev = serveur._leviers({"effort": valeur}, modele, _B)
+        lev = _leviers({"effort": valeur}, modele, _B)
         _verifie(lev["effort"] == "low",
                  f"effort {valeur!r} devrait etre resolu en 'low', "
                  f"obtenu {lev['effort']!r}")
 
     # un effort explicite ne doit surtout pas etre ecrase
-    lev = serveur._leviers({"effort": "high", "max_tokens": 8000}, modele, _B)
+    lev = _leviers({"effort": "high", "max_tokens": 8000}, modele, _B)
     _verifie(lev["effort"] == "high", "un effort choisi doit etre respecte")
     _verifie(lev["max_tokens"] == 8000, "max_tokens choisi doit etre respecte")
 
     # la valeur par defaut quand rien n'est demande
-    lev = serveur._leviers({}, modele, _B)
-    _verifie(lev["max_tokens"] == serveur.MAX_TOKENS,
+    lev = _leviers({}, modele, _B)
+    _verifie(lev["max_tokens"] == 16000,
              "sans max_tokens, on doit prendre celui de la production")
 
     # un modele sans niveaux ne doit pas produire une chaine parapluie
@@ -409,14 +514,16 @@ def test_leviers_api() -> None:
         def effort_serieux(m):
             return None
 
-    lev = serveur._leviers({"effort": "auto"}, {"id": "z", "efforts": []}, _Vide)
+    lev = _leviers({"effort": "auto"}, {"id": "z", "efforts": []}, _Vide)
     _verifie(lev["effort"] is None,
              f"un modele sans niveaux doit donner None, obtenu {lev['effort']!r}")
 
 
 def main() -> int:
-    for fn in (test_catalogue, test_catalogue_complet, test_leviers, test_qualite,
-               test_scenarios, test_resume, test_charge, test_leviers_api):
+    for fn in (test_catalogue, test_catalogue_complet, test_leviers,
+               test_leviers_supports, test_qualite,
+               test_scenarios, test_resume, test_charge,
+               test_reprise_reponse_vide, test_leviers_api):
         fn()
 
     if "--reseau" in sys.argv:

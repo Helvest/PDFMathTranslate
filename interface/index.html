@@ -1655,9 +1655,33 @@ async function vueBanc(v) {
         <input type="number" id="b-temp" value="0" min="0" max="2" step="0.1"
                style="width:70px"></label>
       <label class="rangee"><span class="faible">Timeout</span>
-        <input type="number" id="b-timeout" value="180" min="30" max="900" step="30"
-               style="width:76px"></label>
-    </div>
+              <input type="number" id="b-timeout" value="180" min="30" max="900" step="30"
+                     style="width:76px"></label>
+          </div>
+          <!-- les leviers avances : ils changent le fond de la reponse. Vides par
+               defaut, donc le modele choisit — sauf si tu les remplis. -->
+          <details style="margin-top:8px">
+            <summary class="faible" style="cursor:pointer">Leviers avances</summary>
+            <div class="rangee" style="margin-top:7px">
+              <label class="rangee"><span class="faible">top_p</span>
+                <input type="number" id="b-topp" placeholder="aucun" min="0" max="1" step="0.05"
+                       style="width:88px"></label>
+              <label class="rangee"><span class="faible">seed</span>
+                <input type="number" id="b-seed" placeholder="aucun" step="1"
+                       style="width:88px"></label>
+              <label class="rangee"><span class="faible">repetition_penalty</span>
+                <input type="number" id="b-rep" placeholder="aucun" min="0.5" max="2" step="0.05"
+                       style="width:88px"></label>
+              <label class="rangee"><span class="faible">stop</span>
+                <input type="text" id="b-stopseq" placeholder="aucun" style="width:130px"></label>
+            </div>
+            <p class="faible" style="margin:6px 0 0;font-size:10.5px">
+              <b>seed</b> rend la reponse reproductible : deux bancs avec le meme seed
+              donnent le meme resultat. <b>stop</b> arrete la generation sur un texte.
+              <b>repetition_penalty</b> evite les boucles sur du JSON. Un levier vide
+              n'est pas envoye, et un levier que le modele ne supporte pas est
+              ecarte automatiquement.</p>
+          </details>
     ${choisi ? `<details style="margin-top:9px">
           <summary class="faible" style="cursor:pointer">
             Ce que le proxy dit de ${echapper(choisi.id)}</summary>
@@ -1789,29 +1813,39 @@ async function vueBanc(v) {
           ` : `<p class="vide">Pas encore de mesure de charge.</p>`}
         </div>`;
 
-        v.innerHTML = html;
+    v.innerHTML = html;
 
-        // ---------- le bouton de charge ----------
-        const cl = v.querySelector("#c-lancer");
-        if (cl) cl.addEventListener("click", async () => {
-          const modeles = [...v.querySelectorAll("[data-mod]:checked")].map((c) => c.dataset.mod);
-          if (!modeles.length) return notif("Coche au moins un modele", true);
-          const niveaux = (v.querySelector("#c-niveaux")?.value || "")
-            .split(",").map((x) => Number(x.trim())).filter((x) => x > 0);
-          if (!niveaux.length) return notif("Aucun palier valide", true);
-          try {
-            await api("/banc/charge/lancer", { method: "POST", body: JSON.stringify({
-              modeles: [modeles[0]],   // la charge se mesure sur un modele a la fois
-              niveaux,
-              effort: v.querySelector("#b-effort")?.value || "auto",
-              max_tokens: Number(v.querySelector("#b-maxtok")?.value) || 16000,
-              temperature: Number(v.querySelector("#b-temp")?.value) || 0,
-              timeout: Number(v.querySelector("#b-timeout")?.value) || 180,
-            }) });
-            notif(`Charge : ${modeles[0]}`);
-            vueBanc(v);
-          } catch (e) { notif(e.message, true); }
-        });
+  // les leviers lus une seule fois pour les deux boutons : si chaque bouton
+  // les relisait, ils divergeraient — c'est exactement le bug "auto" d'hier
+  const _leviersUI = () => ({
+    effort: v.querySelector("#b-effort")?.value || "auto",
+    max_tokens: Number(v.querySelector("#b-maxtok")?.value) || 16000,
+    temperature: Number(v.querySelector("#b-temp")?.value) || 0,
+    top_p: v.querySelector("#b-topp")?.value || null,
+    seed: v.querySelector("#b-seed")?.value || null,
+    repetition_penalty: v.querySelector("#b-rep")?.value || null,
+    stop: v.querySelector("#b-stopseq")?.value || null,
+    timeout: Number(v.querySelector("#b-timeout")?.value) || 180,
+  });
+
+  // ---------- le bouton de charge ----------
+  const cl = v.querySelector("#c-lancer");
+  if (cl) cl.addEventListener("click", async () => {
+    const modeles = [...v.querySelectorAll("[data-mod]:checked")].map((c) => c.dataset.mod);
+    if (!modeles.length) return notif("Coche au moins un modele", true);
+    const niveaux = (v.querySelector("#c-niveaux")?.value || "")
+      .split(",").map((x) => Number(x.trim())).filter((x) => x > 0);
+    if (!niveaux.length) return notif("Aucun palier valide", true);
+    try {
+      await api("/banc/charge/lancer", { method: "POST", body: JSON.stringify({
+        modeles: [modeles[0]],   // la charge se mesure sur un modele a la fois
+        niveaux,
+        ..._leviersUI(),
+      }) });
+      notif(`Charge : ${modeles[0]}`);
+      vueBanc(v);
+    } catch (e) { notif(e.message, true); }
+  });
 
   // ---------- branchements ----------
   const bl = v.querySelector("#b-lancer");
@@ -1821,10 +1855,7 @@ async function vueBanc(v) {
     try {
       await api("/banc/lancer", { method: "POST", body: JSON.stringify({
         modeles,
-        effort: v.querySelector("#b-effort")?.value || "auto",
-        max_tokens: Number(v.querySelector("#b-maxtok")?.value) || 16000,
-        temperature: Number(v.querySelector("#b-temp")?.value) || 0,
-        timeout: Number(v.querySelector("#b-timeout")?.value) || 180,
+      ..._leviersUI(),
       }) });
       notif("Banc lance");
       vueBanc(v);

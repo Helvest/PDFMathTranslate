@@ -124,62 +124,113 @@ def effort_serieux(modele: dict) -> str | None:
 # ---------------------------------------------------------------- appel
 
 def _construire(modele: dict, leviers: dict, prompt: str) -> dict:
-    """Le corps de la requete. Un seul endroit pour tous les leviers."""
+    """Le corps de la requete. Un seul endroit pour tous les leviers.
+
+    Chaque levier n'est envoye que si l'utilisateur l'a fixe ET que le modele
+    le supporte. Envoyer un parametre non supporte, c'est faire refuser la
+    requete entiere par le routeur — on ne tente donc rien au hasard.
+    """
+    supporte = set(modele.get("parametres") or [])
     corps = {
         "model": modele["id"],
         "messages": [{"role": "user", "content": prompt}],
     }
-    if leviers.get("max_tokens"):
-        corps["max_tokens"] = int(leviers["max_tokens"])
+
+    def _met(nom_api: str, cle: str, conversion=None):
+        """N'envoie que si regle ET supporte."""
+        v = leviers.get(cle)
+        if v is None or v == "":
+            return
+        # un modele qui ne liste pas supported_parameters ne peut pas etre
+        # verifie : on laisse passer, plutot que de tout refuser
+        if supporte and nom_api not in supporte:
+            return
+        corps[nom_api] = conversion(v) if conversion else v
+
+    _met("max_tokens", "max_tokens", int)
     if leviers.get("temperature") is not None:
         corps["temperature"] = leviers["temperature"]
-    if leviers.get("effort") and modele.get("efforts"):
-        corps["reasoning"] = {"enabled": True, "effort": leviers["effort"]}
-    elif leviers.get("effort") and modele.get("raisonnement_obligatoire"):
-        # le modele impose le raisonnement mais ne liste pas ses niveaux :
-        # on demande le raisonnement sans effort
-        corps["reasoning"] = {"enabled": True}
-    elif modele.get("raisonnement_obligatoire") and leviers.get("sans_effort", True):
+    # ces trois-la changent le fond : la diversite (temperature), la
+    # reproductibilite (seed), et l'arret (stop)
+    _met("top_p", "top_p")
+    _met("seed", "seed", int)
+    _met("stop", "stop")
+    # la repetition est ce qui fait boucler un modele sur du JSON
+    _met("repetition_penalty", "repetition_penalty")
+
+    if modele.get("efforts"):
+        if leviers.get("effort"):
+            corps["reasoning"] = {"enabled": True, "effort": leviers["effort"]}
+    elif modele.get("raisonnement_obligatoire"):
+        # le modele impose le raisonnement sans dire ses niveaux : on demande
+        # le raisonnement, sans effort (un effort parapluie fait tout refuser)
         corps["reasoning"] = {"enabled": True}
     return corps
 
 
-def appeler(modele: dict, prompt: str, leviers: dict, timeout: int = 180) -> dict:
-    """Un appel, avec toutes les mesures."""
-    req = urllib.request.Request(
-        f"{PROXY}/chat/completions",
-        data=json.dumps(_construire(modele, leviers, prompt)).encode(),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {CLE}"})
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            d = json.load(r)
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = json.loads(e.read().decode()).get("message", "")[:120]
-        except Exception:  # noqa: BLE001
-            detail = f"HTTP {e.code}"
-        return {"ok": False, "erreur": detail, "latence": round(time.time() - t0, 1)}
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "erreur": f"{type(e).__name__} apres {time.time()-t0:.0f}s",
-                "latence": round(time.time() - t0, 1)}
+def appeler(modele: dict, prompt: str, leviers: dict, timeout: int = 180,
+            reprises: int = 2) -> dict:
+    """Un appel, avec toutes les mesures, et une reprise si la reponse est vide.
 
-    msg = d["choices"][0]["message"]
-    u = d.get("usage", {}) or {}
-    det = u.get("completion_tokens_details", {}) or {}
-    return {
-        "ok": True,
-        "sortie": (msg.get("content") or "").strip(),
-        "reflexion_fuite": bool((msg.get("content") or "").lstrip().startswith("<")),
-        "a_raisonne": bool(msg.get("reasoning")),
-        "latence": round(time.time() - t0, 1),
-        "tok_entree": u.get("prompt_tokens"),
-        "tok_sortie": u.get("completion_tokens"),
-        "tok_raisonnement": det.get("reasoning_tokens"),
-        "finish": d["choices"][0].get("finish_reason"),
-        "tronce": d["choices"][0].get("finish_reason") == "length",
-    }
+    Le proxy rend parfois une reponse VIDE avec finish_reason=stop : mesure a
+    1 appel sur 8, sans raison apparente, tokens rapportes, aucune erreur. Ce
+    n'est pas un resultat, c'est un echec du service — sans reprise, un huitieme
+    du glossaire manque silencieusement. Comme un timeout, le seul remede est
+    de reessayer.
+
+    Les vraies erreurs (429, 400) ne sont pas reessayees : elles se
+    reproduiraient, et on perdrait du temps pour rien.
+    """
+    dernier: dict = {"ok": False, "erreur": "aucun essai",
+                     "latence": 0.0, "essais": 0, "vide": False}
+    for essai in range(1, max(1, reprises) + 1):
+        req = urllib.request.Request(
+            f"{PROXY}/chat/completions",
+            data=json.dumps(_construire(modele, leviers, prompt)).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {CLE}"})
+        t0 = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                d = json.load(r)
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = json.loads(e.read().decode()).get("message", "")[:120]
+            except Exception:  # noqa: BLE001
+                detail = f"HTTP {e.code}"
+            # 4xx/5xx : inutile de reessayer, ca se reproduirait
+            return {"ok": False, "erreur": detail, "essais": essai,
+                    "latence": round(time.time() - t0, 1), "vide": False}
+        except Exception as e:  # noqa: BLE001
+            dernier = {"ok": False,
+                       "erreur": f"{type(e).__name__} apres {time.time()-t0:.0f}s",
+                       "latence": round(time.time() - t0, 1), "essais": essai,
+                       "vide": False}
+            continue  # un timeout peut se resoudre
+
+        msg = d["choices"][0]["message"]
+        u = d.get("usage", {}) or {}
+        det = u.get("completion_tokens_details", {}) or {}
+        contenu = (msg.get("content") or "").strip()
+        if not contenu and essai < reprises:
+            continue  # reponse vide : on retente
+
+        return {
+            "ok": True,
+            "sortie": contenu,
+            "a_raisonne": bool(msg.get("reasoning")),
+            "latence": round(time.time() - t0, 1),
+            "tok_entree": u.get("prompt_tokens"),
+            "tok_sortie": u.get("completion_tokens"),
+            "tok_raisonnement": det.get("reasoning_tokens"),
+            "finish": d["choices"][0].get("finish_reason"),
+            "tronce": d["choices"][0].get("finish_reason") == "length",
+            "essais": essai,
+            # une reponse vide est un echec du service, pas un resultat vide
+            "vide": not contenu,
+        }
+
+    return dernier
 
 
 # ---------------------------------------------------------------- qualite
