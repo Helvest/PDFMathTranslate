@@ -18,7 +18,6 @@ Traduction AI V2/              <- la racine, hors du dépôt git
 │   ├── donnees.py           glossaire, polices, orphelins, export CSV
 │   ├── analyser.py           passe d'analyse : contexte, polices, glossaire
 │   ├── banc.py               Banc : mesure des modèles et des leviers
-│   ├── test_suite.py         lance les 9 tests depuis l'interface
 │   ├── traduire.sh           traduction (backend v2)
 │   ├── polices.py            charge le mapping de polices pour BabelDOC
 │   ├── catalogue_polices.py  catalogue des polices (3 sources)
@@ -323,31 +322,21 @@ savoir où elle en est.
 | une étape renvoie 0 | tous les appels ont échoué ; regarder le log de l'étape |
 | le port 8756 est occupé | un ancien serveur tourne ; `netstat -ano | grep 8756` puis `taskkill /F /PID` |
 
-**Neuf tests, à lancer avant de conclure.** Ils tournent en ~4 secondes et
-se lancent depuis l'interface, onglet **Tests du code** (bouton du panneau de
-gauche) :
+**Huit tests, à lancer avant de conclure.** Ils tournent en ~4 secondes.
 
 ```bash
-.venv/Scripts/python.exe test_suite.py          # liste ce qui est déclaré
+.venv/Scripts/python.exe -I test_base.py     # test_registre, test_donnees,
+.venv/Scripts/python.exe -I test_export.py   # test_decoupe, test_agents, test_banc
+cd interface && ../.venv/Scripts/python.exe -I test_serveur.py   # test_api
 ```
 
-En ligne de commande, un par un, **avec `-I` et `cwd` sur le dossier du
-test** — sans quoi un `PYTHONPATH` hérité fait charger au `.venv` les paquets
-d'un autre environnement, et `interface/test_serveur.py` échoue sans raison :
+`-I` est obligatoire : sans lui, un `PYTHONPATH` hérité fait charger au
+`.venv` les paquets d'un autre environnement, et `test_serveur` échoue sans
+raison. Chaque test se lance **depuis son dossier** : `interface/test_serveur.py`
+suppose d'y être.
 
-```bash
-.venv/Scripts/python.exe -I test_base.py        # test_registre, test_donnees,
-cd interface && ../.venv/Scripts/python.exe -I test_serveur.py   # test_export,
-                                                      # test_decoupe, test_agents, test_banc
-```
-
-Les tests sont **déclarés** dans `SUITE` (`test_suite.py`). Un `test_*.py`
-présent sur le disque mais absent de la déclaration est signalé comme
-`orphelin` : il existe, mais personne ne le lancera jamais d'ici.
-
-Ils vérifient le schéma, le registre, la logique d'orphelin, l'export, les
-routes et leurs refus. Ils ne remplacent pas l'exécution réelle : c'est
-elle qui a attrapé le `with` qui se fermait trop tot, et le `catch` duplique.
+`test_serveur` compte les routes : elles changent souvent, le nombre dans
+`AGENTS.md` n'est pas une garantie.
 
 Pour le reste, la vérification est d'exécuter et de regarder : `/api/docs` permet de tester chaque route, et
 `python polices.py` / `python catalogue_polices.py` affichent l'état réel des

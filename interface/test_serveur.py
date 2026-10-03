@@ -25,8 +25,6 @@ ROUTES_ATTENDUES = [
     "/api/projets/{nom}/contexte/{cle}",
     "/api/polices/global",
     "/api/banc/catalogue",
-        "/api/tests",
-        "/api/tests/lancer",
     "/api/banc/resultats",
 ]
 

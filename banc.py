@@ -393,17 +393,129 @@ def prompt_scenario(scenario: str, texte: str, doc: str, page: str) -> str:
 SCENARIOS = ("traduction", "glossaire", "contexte", "polices")
 
 
+def _score(scenario: str, n: dict) -> dict:
+    """Une note sur 100, calculable sans lire le texte.
+
+    Elle ne dit pas si la traduction est belle : elle dit si elle est
+    UTILISABLE. Un score de 100 ne garantit rien sur le style, mais un score
+    bas garantit un probleme. Pour trancher, on lit la reponse brute.
+
+    Chaque critere a un poids : ce qui casse la production pese plus que ce qui
+    degrade.
+    """
+    criteres: list[tuple[str, bool, int]] = [
+        # ce qui casse partout : poids fort
+        ("pas tronque", not n.get("tronce"), 30),
+        ("pas de reflexion qui fuit", not n.get("reflexion_fuite"), 10),
+    ]
+
+    if scenario == "traduction":
+        criteres.append(("traduit (pas identique)", not n.get("identique"), 25))
+        # une traduction FR fait ~0,8 a 1,8 fois la source ; hors de cette
+        # plage, c'est qu'il a tronque ou surrounds
+        ratio = n.get("ratio")
+        criteres.append(("longueur plausible",
+                         ratio is not None and 0.5 <= ratio <= 3.0, 10))
+        bal = n.get("balises")
+        if bal and bal != "n/a":
+            ok, total = bal.split("/")
+            criteres.append((f"balises {bal}", int(ok) == int(total), 25))
+        else:
+            criteres.append(("balises conservees", True, 25))  # rien a perdre
+
+    elif scenario == "glossaire":
+        criteres.append(("des termes extraits", (n.get("termes") or 0) > 0, 40))
+        criteres.append(("JSON exploitable", bool(n.get("exploitable")), 20))
+
+    elif scenario == "polices":
+        criteres.append(("JSON valide", bool(n.get("exploitable")), 40))
+        criteres.append(("des polices vues", (n.get("termes") or 0) > 0, 20))
+
+    else:  # contexte
+        criteres.append(("un resume produit", (n.get("longueur") or 0) > 20, 40))
+        criteres.append(("texte exploitable", bool(n.get("exploitable")), 20))
+
+    total = sum(p for _, _, p in criteres)
+    obtenu = sum(p for _, ok, p in criteres if ok)
+    return {
+        "score": round(100 * obtenu / total) if total else 0,
+        "criteres": {nom: ok for nom, ok, _ in criteres},
+    }
+
+
+def _repetitions(mesures: list[dict]) -> dict:
+    """Moyenne, min, max et ecart-type d'une serie de mesures.
+
+    L'ecart-type est ce qui distingue un modele stable d'un modele chanceux :
+    5s en moyenne avec un ecart de 4s ne vaut pas 5s avec un ecart de 1s.
+    """
+    def _serie(cle: str) -> list[float]:
+        return [m[cle] for m in mesures if m.get(cle) is not None]
+
+    out: dict = {}
+    for cle, nom in (("latence", "lat"), ("termes", "termes")):
+        v = _serie(cle)
+        if not v:
+            out[nom] = {"moy": None, "min": None, "max": None, "ecart": None}
+            continue
+        out[nom] = {
+            "moy": round(statistics.mean(v), 1),
+            "min": round(min(v), 1),
+            "max": round(max(v), 1),
+            # l'ecart-type n'a de sens qu'a partir de 2 mesures
+            "ecart": round(statistics.stdev(v), 1) if len(v) > 1 else 0.0,
+        }
+    return out
+
+
 # ---------------------------------------------------------------- execution
 
 def mesurer(modele: dict, scenario: str, leviers: dict, texte: str,
-            doc: str, page: str, timeout: int = 180) -> dict:
-    """Un modele, un scenario, une mesure."""
+            doc: str, page: str, timeout: int = 180,
+            repetitions: int = 1) -> dict:
+    """Un modele, un scenario, mesure.
+
+    Avec repetitions > 1, on repete et on garde la MOYENNE des mesures, plus
+    min/max/ecart-type et la reponse brute d'un run. La repetition sert a deux
+    choses : voir la stabilite (l'ecart-type), et ne pas juger un modele sur un
+    appel qui a eu de la chance ou de la malchance.
+    """
     prompt = prompt_scenario(scenario, texte, doc, page)
-    r = appeler(modele, prompt, leviers, timeout)
-    n = noter(scenario, texte, r)
-    n["scenario"] = scenario
-    n["modele"] = modele["id"]
-    n["prompt_car"] = len(prompt)
+
+    if repetitions <= 1:
+        r = appeler(modele, prompt, leviers, timeout)
+        n = noter(scenario, texte, r)
+        n.update(scenario=scenario, modele=modele["id"], prompt_car=len(prompt),
+                 repetitions=1)
+        n["score"] = _score(scenario, n)["score"]
+        n["criteres"] = _score(scenario, n)["criteres"]
+        n["sortie_brute"] = r.get("sortie", "")[:4000] if r.get("ok") else ""
+        return n
+
+    mesures: list[dict] = []
+    brut = ""
+    for _ in range(repetitions):
+        r = appeler(modele, prompt, leviers, timeout)
+        m = noter(scenario, texte, r)
+        mesures.append(m)
+        # on garde la premiere reponse exploitable : c'est ce que tu lis
+        if not brut and m.get("exploitable"):
+            brut = r.get("sortie", "")[:4000]
+
+    reussies = [m for m in mesures if m.get("ok")]
+    # on resume sur la MEILLEURE mesure exploitable, sinon sur la premiere :
+    # une moyenne de mesures non exploitables ne veut rien dire
+    base = next((m for m in mesures if m.get("exploitable")), mesures[0])
+
+    n = dict(base)
+    n.update(scenario=scenario, modele=modele["id"], prompt_car=len(prompt),
+             repetitions=repetitions, reussis=len(reussies))
+    n["mesures"] = mesures
+    n["stats"] = _repetitions(reussies or mesures)
+    n["lat_moy"] = n["stats"]["lat"]["moy"]
+    n["score"] = _score(scenario, n)["score"]
+    n["criteres"] = _score(scenario, n)["criteres"]
+    n["sortie_brute"] = brut
     return n
 
 
@@ -424,15 +536,17 @@ def _resume(reponses: list[dict]) -> dict:
 
 
 def lancer(modeles: list[dict], leviers: dict, scenarios=SCENARIOS,
-           timeout: int = 180) -> dict:
+           timeout: int = 180, repetitions: int = 1) -> dict:
     """Tous les modeles, tous les scenarios, en parallele."""
     texte, doc, page = _page_de_test()
     tasks = [(m, s) for m in modeles for s in scenarios]
     brut: dict[tuple[str, str], dict] = {}
 
+    # 6 workers : au-dela, on se dispute le service (mesure par le Banc charge)
     with ThreadPoolExecutor(max_workers=6) as ex:
         futs = {
-            ex.submit(mesurer, m, s, leviers, texte, doc, page, timeout): (m["id"], s)
+            ex.submit(mesurer, m, s, leviers, texte, doc, page, timeout,
+                      repetitions): (m["id"], s)
             for m, s in tasks
         }
         for f in as_completed(futs):
@@ -442,8 +556,12 @@ def lancer(modeles: list[dict], leviers: dict, scenarios=SCENARIOS,
     par_modele = []
     for m in modeles:
         reps = [brut.get((m["id"], s), {}) for s in scenarios]
+        scores = [r["score"] for r in reps if r.get("score") is not None]
         ligne = {"modele": m["id"], "nom": m.get("nom", ""),
-                 "effort": leviers.get("effort", "aucun"),
+                 "effort": leviers.get("effort") or "aucun",
+                 # la note globale : moyenne des scenarios. C'est ce qui
+                 # permet de classer d'un coup d'oeil.
+                 "score": round(statistics.mean(scores)) if scores else 0,
                  **_resume(reps)}
         for s, r in zip(scenarios, reps):
             ligne[s] = r
@@ -452,6 +570,7 @@ def lancer(modeles: list[dict], leviers: dict, scenarios=SCENARIOS,
     return {
         "maj": datetime.now().isoformat(timespec="seconds"),
         "leviers": leviers,
+        "repetitions": repetitions,
         "texte_car": len(texte),
         "pdf": doc,
         "modeles": par_modele,

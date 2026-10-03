@@ -280,6 +280,16 @@
     font-size: 10.5px; line-height: 1.5; white-space: pre-wrap;
     word-break: break-word; user-select: text;
   }
+  /* --- Banc : le tableau croise et les notes --- */
+  .croise th.sep, .croise td.sep { border-left: 2px solid var(--border); }
+  .croise th.grp { text-align: center; border-bottom: 1px solid var(--border); }
+  .croise td.nom-modele { font-size: 11px; white-space: nowrap; }
+  .croise th.tri { user-select: none; }
+  .croise th.tri:hover { color: var(--accent); }
+  /* la note est le seul repere visuel du tableau : elle doit sauter aux yeux */
+  .croise td.bon    { color: var(--ok);      font-weight: 700; }
+  .croise td.moyen  { color: var(--warn, #d68910); font-weight: 600; }
+  .croise td.mauvais{ color: var(--danger, #c0392b); font-weight: 700; }
 </style>
 </head>
 <body>
@@ -302,9 +312,7 @@
     </div>
     <div class="pliste" id="pliste"></div>
     <div class="pied" style="flex-direction:column">
-      <button class="btn plein" id="btn-tests"
-    title="Lancer les tests du code (schema, registre, agents, routes)">Tests du code</button>
-  <button class="btn plein" id="btn-banc"
+      <button class="btn plein" id="btn-banc"
         title="Mesurer les modeles sur nos 4 scenarios de production (global, hors projet)">Banc des modeles</button>
       <button class="btn plein acc" id="btn-creer">+ Creer un projet</button>
     </div>
@@ -721,13 +729,11 @@ function dessinerVue() {
   const v = $("#vue");
   // le bench est global : il s'affiche meme sans projet
   if (S.vue === "banc") { vueBanc(v); return; }
-  if (S.vue === "tests") { vueTests(v); return; }
   if (!S.actif) {
     v.innerHTML = '<p class="vide">Aucun projet. Cree-en un avec le bouton en bas a droite.</p>';
     return;
   }
   if (S.vue === "banc") { vueBanc(v); return; }
-  if (S.vue === "tests") { vueTests(v); return; }
   ({
     config: vueConfig, options: vueOptions, contexte: vueContexte,
     polices: vuePolices, glossaire: vueGlossaire, pdfs: vuePdfs, log: vueLog,
@@ -1597,95 +1603,50 @@ function comparer(nomSource, trad, v) {
   zone.scrollIntoView({ behavior: "smooth" });
 }
 
-// --- bench (global, hors projet) ---
-async function vueTests(v) {
-  let d;
-  try { d = await api("/tests"); }
-  catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
+// --- le tableau croise du Banc : lignes = modeles, colonnes = tout le reste.
+// Triable sur n'importe quelle colonne : c'est la seule facon de savoir quel
+// modele gagne sur QUEL scenario plutot qu'en moyenne.
+let _triBanc = { col: "score", sens: -1 };
 
-  S.tests = d;
-  const res = d.resultat;
-  const etat = d.etat || {};
-  const enCours = etat.etat === "en_cours";
-  const ko = res ? res.tests.filter((t) => !t.ok) : [];
+const _ETIQ_COURT = { traduction: "Trad", glossaire: "Glos", contexte: "Ctx", polices: "Poli" };
 
-  let html = `<div class="bloc">
-    <h2 class="titre">Tests du projet</h2>
-    <p class="faible" style="margin:0 0 9px">
-      Le <b>Banc</b> mesure les modeles ; ces tests verifient le <b>code</b> :
-      schema, registre, export, agents, routes. Chaque test a son propre
-      processus — un test qui plante n'arrete pas les autres.</p>
-    <div class="rangee" style="margin-bottom:9px">
-      <button class="btn acc" id="t-lancer" ${enCours ? "disabled" : ""}>
-        ${enCours ? "Tests en cours…" : "Lancer tous les tests"}</button>
-      ${enCours ? '<button class="btn danger" id="t-stop">Abandonner</button>' : ""}
-      <button class="btn" id="t-rafraichir">Rafraichir</button>
-      ${res ? `<span class="${res.tout_passe ? "" : "alerte"}">
-        ${res.reussis}/${res.total} reussis${res.maj ? ` — ${echapper(res.maj)}` : ""}
-      </span>` : ""}
-    </div>
-    ${etat.log ? `<div class="log" style="max-height:90px">${echapper(etat.log)}</div>` : ""}
-    ${d.orphelins && d.orphelins.length ? `<p class="vide" style="margin-top:7px">
-      ${d.orphelins.length} fichier(s) test_*.py non declares :
-      <b>${d.orphelins.map(echapper).join(", ")}</b> — ils existent mais ne se
-      lancent pas d'ici.</p>` : ""}
-  </div>`;
-
-  // --- la liste, avec le resultat de chaque test
-  html += `<div class="bloc">
-    <h2 class="titre">Ce qui est teste — ${d.tests.length}</h2>
-    <div class="scroll-tab"><table>
-      <tr><th></th><th>Test</th><th>Ce qu'il garantit</th><th>Fichier</th><th>Resultat</th></tr>
-      ${d.tests.map((t) => {
-        const r = res ? res.tests.find((x) => x.nom === t.nom) : null;
-        const marque = !t.existe ? "MANQUANT"
-          : !r ? "—"
-          : r.ok ? '<span class="pastille ok">ok</span>'
-          : '<span class="pastille warn">echec</span>';
-        const duree = r && r.duree_s !== undefined ? ` ${r.duree_s}s` : "";
-        return `<tr>
-          <td><input type="checkbox" data-test="${echapper(t.nom)}" checked></td>
-          <td>${echapper(t.nom)}</td>
-          <td class="faible">${echapper(t.garantit)}</td>
-          <td class="faible" style="font-size:10.5px">${echapper(t.fichier)}${duree}</td>
-          <td>${marque}</td>
-        </tr>`;
-      }).join("")}
-    </table></div>
-  </div>`;
-
-  // --- les sorties des echecs : sans elles, "echec" ne dit rien
-  if (ko.length) {
-    html += `<div class="bloc">
-      <h2 class="titre">Sorties des echecs — ${ko.length}</h2>
-      ${ko.map((t) => `<div style="margin-bottom:9px">
-        <div class="faible" style="margin-bottom:3px"><b>${echapper(t.nom)}</b>
-          ${t.code !== null && t.code !== undefined ? `— code ${t.code}` : ""}
-          ${t.erreur ? `— ${echapper(t.erreur)}` : ""}</div>
-        <div class="log" style="max-height:150px">${
-          echapper((t.sortie || []).join("\n"))}</div>
-      </div>`).join("")}
-    </div>`;
+function _valeurTri(modele, col) {
+  const E = _ETIQ_COURT;
+  if (col === "modele") return modele.modele || "";
+  if (col === "score") return modele.score ?? -1;
+  if (col === "lat_moy") return modele.lat_moy ?? 99999;
+  if (col.startsWith("score_")) return modele[E[col.slice(6)]]?.score ?? -1;
+  if (col.startsWith("lat_")) {
+    const s = modele[E[col.slice(4)]]?.stats?.lat;
+    return s?.[col.slice(4)] ?? 99999;
   }
-
-  v.innerHTML = html;
-
-  const bl = v.querySelector("#t-lancer");
-  if (bl) bl.addEventListener("click", async () => {
-    const noms = [...v.querySelectorAll("[data-test]:checked")].map((c) => c.dataset.test);
-    if (!noms.length) return notif("Coche au moins un test", true);
-    try {
-      await api("/tests/lancer", { method: "POST", body: JSON.stringify({ tests: noms }) });
-      notif(`${noms.length} test(s) lance(s)`);
-      vueTests(v);
-    } catch (e) { notif(e.message, true); }
-  });
-  v.querySelector("#t-rafraichir")?.addEventListener("click", () => vueTests(v));
-  v.querySelector("#t-stop")?.addEventListener("click", () => vueTests(v));
+  if (col.startsWith("ecart_")) return modele[E[col.slice(6)]]?.stats?.lat?.ecart ?? 0;
+  if (col.startsWith("termes_")) return modele[E[col.slice(7)]]?.termes ?? 0;
+  return 99999;   // colonne non triee : en fin de liste
 }
 
-// ---------------------------------------------------------------- banc
-async function vueBanc(v) {
+function _trierBanc(modeles, col) {
+  if (_triBanc.col !== col) _triBanc.sens = col === "modele" ? 1 : -1;
+  else _triBanc.sens *= -1;
+  _triBanc.col = col;
+  const s = _triBanc.sens;
+  return [...modeles].sort((a, b) => {
+    const x = _valeurTri(a, col), y = _valeurTri(b, col);
+    return (typeof x === "string" || typeof y === "string")
+      ? String(x).localeCompare(String(y)) * s : (x - y) * s;
+  });
+}
+
+function _thTri(col, libelle) {
+  const actif = _triBanc.col === col;
+  const fleche = actif ? (_triBanc.sens > 0 ? " \u25B2" : " \u25BC") : "";
+  return `<th class="tri" data-tri="${echapper(col)}"
+    title="Trier par ${echapper(libelle.toLowerCase())}"
+    style="cursor:pointer${actif ? ";font-weight:700" : ""}">${echapper(libelle)}${fleche}</th>`;
+}
+
+// --- le Banc (global, hors projet) ---
+async function vueBanc(v, colTri) {
   let d;
   try { d = await api("/banc/resultats"); }
   catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
@@ -1745,6 +1706,9 @@ async function vueBanc(v) {
       <label class="rangee"><span class="faible">Temperature</span>
         <input type="number" id="b-temp" value="0" min="0" max="2" step="0.1"
                style="width:70px"></label>
+      <label class="rangee"><span class="faible">Repetitions</span>
+        <input type="number" id="b-repet" value="3" min="1" max="10" step="1"
+               style="width:64px"></label>
       <label class="rangee"><span class="faible">Timeout</span>
               <input type="number" id="b-timeout" value="180" min="30" max="900" step="30"
                      style="width:76px"></label>
@@ -1819,50 +1783,87 @@ async function vueBanc(v) {
     </div>
   </div>`;
 
-  // ---------- les resultats ----------
+  // ---------- le tableau croise ----------
+  // lignes = modeles, colonnes = score global puis un bloc par scenario.
+  // C'est ce qui permet de voir quel modele gagne sur QUOI, pas seulement en
+  // moyenne : un modele rapide mais qui casse le glossaire se voit ici.
   if (!res.modeles || !res.modeles.length) {
     html += `<div class="bloc"><p class="vide">Aucun resultat. Coche un modele et lance le banc.</p></div>`;
   } else {
-    for (const m of res.modeles) {
-      html += `<div class="bloc">
-        <h2 class="titre">${echapper(m.modele)}
-          <span class="faible" style="font-weight:400">${m.reussis} reussis —
-            lat moy ${m.lat_moy ?? "—"}s, max ${m.lat_max ?? "—"}s —
-            ${m.exploitables} exploitables${m.tronces ? `, <span class="alerte">${m.tronces} tronque(s)</span>` : ""}</span></h2>
-        <div class="scroll-tab"><table>
-          <tr><th>Scenario</th><th>Latence</th><th>Tokens ent./sort.</th><th>Raisonnement</th>
-              <th>Termes</th><th>Balises</th><th>Ratio</th><th>Finish</th><th>Verdict</th><th>Erreur</th></tr>`;
-      for (const s of (S.bancScenarios || [])) {
-        const r = m[s] || {};
-        const etiq = { traduction: "Traduction", glossaire: "Glossaire",
-                       contexte: "Contexte", polices: "Polices" }[s] || s;
-        if (!r.ok) {
-          html += `<tr><td>${etiq}</td><td class="faible">${r.latence ?? "—"}s</td>
-            <td colspan="8" style="color:var(--danger,#c0392b);font-size:11px">${echapper((r.erreur || "echec").slice(0, 70))}</td></tr>`;
-          continue;
-        }
-        const bon = r.exploitable;
-        html += `<tr>
-          <td>${etiq}</td>
-          <td${bon ? ' style="color:var(--ok)"' : ""}>${r.latence}s</td>
-          <td class="faible">${r.tok_entree ?? "—"} / ${r.tok_sortie ?? "—"}</td>
-          <td class="faible">${r.tok_raisonnement ?? "—"}</td>
-          <td>${r.termes ?? "—"}</td>
-          <td>${echapper(r.balises ?? "—")}</td>
-          <td class="faible">${r.ratio ?? "—"}</td>
-          <td class="faible">${echapper(r.finish || "—")}</td>
-          <td>${bon ? '<span class="pastille ok">exploitable</span>'
-                   : `<span class="pastille warn">${r.tronce ? "tronque" : "inexploitable"}</span>`}</td>
-          <td class="faible" style="font-size:10.5px">${
-            [r.reflexion_fuite ? "reflexion fuit" : "", r.identique ? "identique" : ""]
-              .filter(Boolean).join(", ") || "—"}</td>
-        </tr>`;
-      }
-      html += `</table></div></div>`;
-          }
-        }
+    const scens = S.bancScenarios || [];
+    const ETIQ = {traduction: "Traduction", glossaire: "Glossaire",
+                   contexte: "Contexte", polices: "Polices"};
+    const COURT = {traduction: "Trad", glossaire: "Glos", contexte: "Ctx", polices: "Poli"};
+    const lignes = _trierBanc(res.modeles, colTri || _triBanc.col);
 
-        // ---------- la charge ----------
+    html += `<div class="bloc">
+      <h2 class="titre">Comparatif — ${res.modeles.length} modele(s),
+        ${res.repetitions || 1} repetition(s) par scenario</h2>
+      <p class="faible" style="margin:0 0 7px">
+        Clique un titre de colonne pour trier. Le score est sur 100 et juge
+        l'utilisabilite (troncature, balises, JSON valide), pas le style —
+        deploye une reponse pour juger sur le texte.</p>
+      <div class="scroll-tab"><table class="croise">
+        <tr>
+          ${_thTri("modele", "Modèle")}
+          ${_thTri("score", "Score")}
+          ${_thTri("lat_moy", "Lat moy")}
+          <th class="sep"></th>
+          ${scens.map((s) => `<th colspan="4" class="grp">${ETIQ[s] || s}</th>`).join("")}
+        </tr>
+        <tr>
+          <th></th><th></th><th></th><th class="sep"></th>
+          ${scens.map((s) => `<th></th>${_thTri("lat_" + s, "Lat moy")}${_thTri("ecart_" + s, "Écart")}${_thTri("termes_" + s, "Termes")}`).join("")}
+        </tr>
+        ${lignes.map((m) => `<tr>
+          <td class="nom-modele">${echapper(m.modele)}
+            ${m.gratuit ? '<span class="pastille ok">gratuit</span>' : ""}</td>
+          <td class="${m.score >= 90 ? "bon" : m.score >= 60 ? "moyen" : "mauvais"}">${m.score}</td>
+          <td>${m.lat_moy ?? "—"}s</td>
+          <td class="sep"></td>
+          ${scens.map((s) => {
+            const x = m[s] || {};
+            if (!x.ok && !x.exploitable) {
+              return `<td colspan="4" class="faible" style="font-size:10.5px">
+                ${echapper((x.erreur || "echec").slice(0, 40))}</td>`;
+            }
+            const st = x.stats?.lat || {};
+            const ecart = st.ecart;
+            return `<td class="${x.score >= 90 ? "bon" : x.score >= 60 ? "moyen" : "mauvais"}">${x.score ?? "—"}</td>
+              <td>${st.moy ?? x.latence ?? "—"}s</td>
+              <td class="${ecart > 3 ? "alerte" : "faible"}">${ecart != null ? ecart + "s" : "—"}</td>
+              <td class="faible">${x.termes ?? "—"}</td>`;
+          }).join("")}
+        </tr>`).join("")}
+      </table></div>
+    </div>`;
+
+    // --- les reponses brutes, une par modele et par scenario
+    html += `<div class="bloc">
+      <h2 class="titre">Reponses brutes</h2>
+      <p class="faible" style="margin:0 0 7px">
+        Le score trie, le texte tranche. C'est la seule facon fiable de juger
+        une traduction.</p>
+      ${lignes.map((m) => scens.map((s) => {
+        const x = m[s] || {};
+        if (!x.sortie_brute) return "";
+        const ko = Object.entries(x.criteres || {}).filter(([, v]) => !v)
+          .map(([k]) => k);
+        return `<details style="margin-bottom:5px">
+          <summary style="cursor:pointer;font-size:11.5px">
+            <b>${echapper(COURT[s] || s)}</b> — ${echapper(m.modele)}
+            <span class="faible">score ${x.score ?? "—"}
+              ${x.stats?.lat?.moy != null ? `, ${x.stats.lat.moy}s ±${x.stats.lat.ecart}s` : ""}
+              ${ko.length ? ` — <span class="alerte">${echapper(ko.join(", "))}</span>` : ""}
+            </span>
+          </summary>
+          <pre class="brut-json">${echapper(x.sortie_brute)}</pre>
+        </details>`;
+      }).join("")).join("")}
+    </div>`;
+  }
+
+  // ---------- la charge ----------
         // Combien d'appels simultanes le modele encaisse-t-il ? C'est la question
         // qu'on se pose avant de lancer 40 blocs de glossaire en parallele.
         html += `<div class="bloc">
@@ -1906,6 +1907,10 @@ async function vueBanc(v) {
 
     v.innerHTML = html;
 
+  // le tri : on re-rend avec la nouvelle colonne
+  v.querySelectorAll("[data-tri]").forEach((th) =>
+    th.addEventListener("click", () => vueBanc(v, th.dataset.tri)));
+
   // les leviers lus une seule fois pour les deux boutons : si chaque bouton
   // les relisait, ils divergeraient — c'est exactement le bug "auto" d'hier
   const _leviersUI = () => ({
@@ -1916,6 +1921,7 @@ async function vueBanc(v) {
     seed: v.querySelector("#b-seed")?.value || null,
     repetition_penalty: v.querySelector("#b-rep")?.value || null,
     stop: v.querySelector("#b-stopseq")?.value || null,
+    repetitions: Number(v.querySelector("#b-repet")?.value) || 3,
     timeout: Number(v.querySelector("#b-timeout")?.value) || 180,
   });
 
@@ -2064,12 +2070,6 @@ $("#onglets").addEventListener("click", (ev) => {
 
 // Le banc et les tests ne sont pas un projet : on decoche les onglets
 // pendant qu'on est dedans.
-$("#btn-tests").addEventListener("click", () => {
-  S.vue = "tests";
-  document.querySelectorAll(".onglet").forEach((o) => o.classList.remove("on"));
-  $("#projet-titre").textContent = "";
-  dessinerVue();
-});
 $("#btn-banc").addEventListener("click", () => {
   S.vue = "banc";
   document.querySelectorAll(".onglet").forEach((o) => o.classList.remove("on"));

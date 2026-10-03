@@ -1393,62 +1393,6 @@ def _leviers(payload: dict, modele: dict, banc) -> dict:
     }
 
 
-# ----------------------------------------------------------------- Tests
-# Le Banc mesure les MODELES, pas le code. Les neuf fichiers test_*.py qui
-# verifient le schema, le registre, l'export et les agents ne se lancent
-# qu'en ligne de commande. test_suite.py les centralise pour qu'on puisse les
-# lancer d'ici, comme tout le reste.
-
-TESTS: dict = {"etat": "pret", "log": "", "debut": None, "resultat": None}
-
-
-@app.get("/api/tests")
-def api_tests_lister():
-    """Ce qui est teste, et ce qui existe reellement."""
-    sys.path.insert(0, str(DEPOT))
-    import test_suite
-
-    liste, orphelins = test_suite.decouvrir()
-    return {"tests": liste, "orphelins": orphelins,
-            "etat": dict(TESTS), "resultat": TESTS.get("resultat")}
-
-
-@app.post("/api/tests/lancer")
-def api_tests_lancer(payload: dict):
-    """Lance les tests demandes, ou tous si la liste est vide.
-
-    Chaque test a son propre processus : un test qui plante n'arrete pas les
-    autres, et on veut son vrai code de retour.
-    """
-    if TESTS["etat"] == "en_cours":
-        raise HTTPException(409, "une suite de tests tourne deja")
-
-    sys.path.insert(0, str(DEPOT))
-    import test_suite
-
-    noms = payload.get("tests") or []
-    timeout = int(payload.get("timeout") or 300)
-
-    TESTS.update(etat="en_cours", log="", resultat=None,
-                 debut=datetime.now().isoformat(timespec="seconds"))
-
-    def _travail():
-        try:
-            TESTS["log"] = "Lancement..."
-            r = test_suite.lancer(noms or None, timeout=timeout)
-            TESTS["resultat"] = r
-            TESTS["etat"] = "termine"
-            TESTS["log"] = (f"{r['reussis']}/{r['total']} tests reussis"
-                            + (f", {len(r['orphelins'])} non declares"
-                               if r["orphelins"] else ""))
-        except Exception as e:  # noqa: BLE001
-            TESTS["etat"] = "erreur"
-            TESTS["log"] = f"{type(e).__name__}: {e}"
-
-    threading.Thread(target=_travail, daemon=True).start()
-    return {"ok": True, "tests": noms or "tous"}
-
-
 @app.get("/api/banc/charge")
 def api_banc_charge():
     """La mesure de charge : combien d'agents le modele encaisse-t-il ?"""
@@ -1479,7 +1423,6 @@ def api_banc_charge_lancer(payload: dict):
     modele = choisis[0]
     leviers = _leviers(payload, modele, banc)
     timeout = int(payload.get("timeout") or 180)
-
     BANC.update(etat="en_cours", log="", erreur="",
                 debut=datetime.now().isoformat(timespec="seconds"))
 
@@ -1541,13 +1484,17 @@ def api_banc_lancer(payload: dict):
         if not leviers["effort"]:
             leviers["effort"] = None
     timeout = int(payload.get("timeout") or 180)
+    # 3 repetitions par defaut : au-dela, un banc devient long ; en dessous,
+    # on ne voit pas la stabilite — qui est justement ce qu'on cherche.
+    repetitions = max(1, min(10, int(payload.get("repetitions") or 3)))
 
     BANC.update(etat="en_cours", log="", erreur="",
                 debut=datetime.now().isoformat(timespec="seconds"))
 
     def _travail():
         try:
-            r = banc.lancer(choisis, leviers, timeout=timeout)
+            r = banc.lancer(choisis, leviers, timeout=timeout,
+                            repetitions=repetitions)
             banc.BENCH.mkdir(parents=True, exist_ok=True)
             banc.RESULTATS.write_text(
                 json.dumps(r, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
