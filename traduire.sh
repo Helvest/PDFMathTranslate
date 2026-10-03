@@ -72,7 +72,17 @@ if ! curl -sf "$PROXY/models" -H "Authorization: Bearer hermes" >/dev/null; then
   echo "  la traduction va echouer. Lance: hermes proxy start --provider nous --port 8645" >&2
 fi
 
-FILES=("$@")
+# --pages n'est pas un nom de fichier : on le separe des arguments positionnels.
+# Syntaxe BabelDOC : 1,3,5-7
+declare -a FILES=()
+PAGES=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--pages" ]; then
+    PAGES="$2"; shift 2
+  else
+    FILES+=("$1"); shift
+  fi
+done
 if [ ${#FILES[@]} -eq 0 ]; then
   shopt -s nullglob
   FILES=("$WORK/source"/*.pdf)
@@ -101,6 +111,14 @@ fi
 
 for f in "${FILES[@]}"; do
   echo "=== $(basename "$f") ==="
+  if [ -n "$PAGES" ]; then
+    echo "--- pages $PAGES ; le reste vient du cache, sans appel LLM ---"
+  fi
+  # Le cache BabelDOC est ce qui rend la reprise gratuite : sans lui, relancer
+  # repaie chaque paragraphe deja traduit.
+  if ! curl -sf "$PROXY/models" -H "Authorization: Bearer hermes" >/dev/null; then
+    echo "AVERTISSEMENT: proxy injoignable — rien ne sera traduit." >&2
+  fi
   "$V2" "$f" \
     --openai \
     --openai-base-url "$PROXY" \
@@ -113,6 +131,7 @@ for f in "${FILES[@]}"; do
     --no-dual \
         $([ "$GLOSSAIRE_AUTO" = "1" ] || echo "--no-auto-extract-glossary") \
         ${GLOSSARY:+--glossaries "$GLOSSARY"} \
+    ${PAGES:+--pages "$PAGES"} \
     --watermark-output-mode no_watermark \
     --auto-enable-ocr-workaround \
     --output "$WORK/traduits" \

@@ -73,6 +73,8 @@
   .etape.erreur { border-color: var(--erreur); }
   .etape.erreur .ic { color: var(--erreur); }
   .etape.bloque { opacity: .45; }
+  .etape.pause { border-color: var(--attention); }
+  .etape.pause .ic { color: var(--attention); }
   .etape.tout { flex: 0 0 auto; padding: 5px 14px; border-color: var(--accent); }
 
   .pilule {
@@ -333,7 +335,7 @@ const S = {
   modeles: [], modelesErreur: "",
 };
 
-const ICONES = { pret: "▶", en_cours: "◐", termine: "✓", erreur: "✕", bloque: "⊘" };
+const ICONES = { pret: "▶", en_cours: "◐", termine: "✓", erreur: "✕", bloque: "⊘", pause: "⏸" };
 const ORDRE = ["contexte", "polices", "glossaire", "traduire"];
 const LIB = { contexte: "Contexte", polices: "Polices", glossaire: "Glossaire",
               traduire: "Traduire", tout: "Tout" };
@@ -521,6 +523,25 @@ function dessinerEtapes() {
 
   const bs = zone.querySelector("[data-suivant]");
   if (bs) bs.addEventListener("click", () => lancerEtapeSuivante());
+
+  // Pause : visible seulement si une etape tourne. Relancer suffit ensuite,
+  // le cache BabelDOC evite de retraduire ce qui est deja fait.
+  if (ORDRE.some((e) => S.etapes[e]?.etat === "en_cours")) {
+    const bp = document.createElement("button");
+    bp.className = "etape pause";
+    bp.dataset.pause = "";
+    bp.title = "Arreter la tache en cours — relance pour reprendre";
+    bp.innerHTML = '<span class="ic">⏸</span><span class="nom">Pause</span>';
+    bp.addEventListener("click", async () => {
+      try {
+        await api(`/projets/${encodeURIComponent(S.actif)}/etape/pause`,
+          { method: "POST", body: "{}" });
+        notif("Arrete — relance pour reprendre");
+        chargerProjet(S.actif);
+      } catch (e) { notif(e.message, true); }
+    });
+    zone.appendChild(bp);
+  }
 
   zone.querySelectorAll("[data-etape]").forEach((b) =>
     b.addEventListener("click", () => lancerEtape(b.dataset.etape)));

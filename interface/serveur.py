@@ -83,6 +83,8 @@ app = FastAPI(title="Traduction PDF")
 # un travail en cours ne survit pas a un redemarrage de toute facon.
 #   {projet: {etape: {"etat":..., "fait":..., "total":..., "log":..., "debut":...}}}
 ETATS: dict[str, dict[str, dict]] = {}
+# Processus en cours, par (projet, etape) : pour pouvoir les arreter.
+PROCESSUS: dict[tuple[str, str], subprocess.Popen] = {}
 VERROU = threading.Lock()
 
 # Regles de parallelisation (voir PLAN.md section 3).
@@ -203,10 +205,16 @@ def _suivre(projet: str, etape: str, proc: subprocess.Popen) -> None:
     proc.wait()
     with VERROU:
         e = ETATS[projet][etape]
+        # une pause posee a la main n'est pas ecrasee par le code de retour :
+        # le processus est tue, donc son code n'est pas un echec reel
+        if e.get("etat") == "pause":
+            PROCESSUS.pop((projet, etape), None)
+            return
         e["etat"] = "termine" if proc.returncode == 0 else "erreur"
         e["fin"] = datetime.now().isoformat(timespec="seconds")
         if proc.returncode != 0:
             e["erreur"] = f"code {proc.returncode}"
+    PROCESSUS.pop((projet, etape), None)
 
 
 def _options(projet: str) -> dict:
@@ -282,6 +290,7 @@ def _demarrer(projet: str, etape: str) -> subprocess.Popen:
 def _lancer(projet: str, etape: str) -> None:
     """Lance une etape en arriere-plan et la suit."""
     proc = _demarrer(projet, etape)
+    PROCESSUS[(projet, etape)] = proc
     threading.Thread(target=_suivre, args=(projet, etape, proc), daemon=True).start()
 
 
@@ -1123,6 +1132,41 @@ def api_etape_suivante(nom: str):
             "termes_pieges": n_pieges,
         },
     }
+
+
+@app.post("/api/projets/{nom}/etape/pause")
+def api_pause(nom: str):
+    """Arrete la tache en cours.
+
+    Pas besoin d'ecrire d'etat : relancer suffit. Le cache BabelDOC evite de
+    retraduire les paragraphes deja faits, donc rien n'est perdu.
+    """
+    _projet(nom)
+    with VERROU:
+        en_cours = [
+            e for e, v in ETATS.get(nom, {}).items() if v.get("etat") == "en_cours"
+        ]
+
+    if not en_cours:
+        return {"ok": True, "rien": True}
+
+    arretes = []
+    for etape in en_cours:
+        proc = PROCESSUS.get((nom, etape))
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            arretes.append(etape)
+        with VERROU:
+            e = ETATS.get(nom, {}).get(etape)
+            if e is not None:
+                e["etat"] = "pause"
+                e["erreur"] = "arretee — relance pour reprendre"
+
+    return {"ok": True, "arretes": arretes, "reprendable": True}
 
 
 @app.post("/api/projets/{nom}/etape/{etape}")
