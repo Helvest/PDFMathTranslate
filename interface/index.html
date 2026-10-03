@@ -957,18 +957,25 @@ async function sauverContexte(cle, contenu) {
 // --- polices ---
 async function vuePolices(v) {
   const nom = encodeURIComponent(S.actif);
-  const [csv, det] = await Promise.all([
-    api(`/projets/${nom}/fichier/polices`).catch(() => ({ contenu: "" })),
+  const [lignes, det] = await Promise.all([
+    api(`/projets/${nom}/polices`).catch(() => []),
     api(`/projets/${nom}`),
   ]);
-  let lignes = csvLignes(csv.contenu);
   const pol = det.polices_installees || {};
   const duProjet = pol.projet || [];
   const globales = pol.global || [];
   const babeldoc = pol.babeldoc || [];
   const installees = new Set(duProjet.map((x) => x.nom));
 
-  lignes = appliquerTri(lignes, "polices", ["spans", "pages", "nb_pdfs"]);
+  const t = S.tris.polices;
+  if (t.col && t.sens) {
+    const num = ["spans", "pages", "nb_pdfs"].includes(t.col);
+    lignes.sort((a, b) => {
+      const x = num ? (Number(a[t.col]) || 0) : String(a[t.col] ?? "").toLowerCase();
+      const y = num ? (Number(b[t.col]) || 0) : String(b[t.col] ?? "").toLowerCase();
+      return (num ? x - y : x.localeCompare(y, "fr")) * t.sens;
+    });
+  }
 
   // La liste deroulante : les trois provenances, groupees par <optgroup>.
   const groupes = [
@@ -1078,20 +1085,20 @@ async function vuePolices(v) {
   if (sv) sv.addEventListener("click", async () => {
     const maj = {};
     v.querySelectorAll("[data-pol]").forEach((s) => (maj[s.dataset.pol] = s.value));
-    const enteteCsv = ["police_origine", "remplacement", "origine", "propose",
-                       "raison", "famille", "spans", "pages", "nb_pdfs", "pdfs"];
-    const out = [enteteCsv.join(",")];
-    for (const l of lignes) {
-      const r = { ...l, remplacement: maj[l.police_origine] ?? "" };
-      if (r.remplacement && r.remplacement !== (l.propose || "")) r.origine = "manuel";
-      else if (!r.remplacement) r.origine = "defaut";
-      else r.origine = "auto";
-      out.push(enteteCsv.map((h) => csvChamp(r[h])).join(","));
-    }
+    const polices = lignes.map((l) => {
+      const remplacement = maj[l.police_origine] ?? "";
+      let origine = l.origine;
+      if (remplacement && remplacement !== (l.propose || "")) origine = "manuel";
+      else if (!remplacement) origine = "defaut";
+      return {
+        police_origine: l.police_origine, remplacement, origine,
+        propose: l.propose, raison: l.raison, famille: l.famille,
+      };
+    });
     try {
-      await api(`/projets/${nom}/fichier/polices`, {
-        method: "PUT", body: JSON.stringify({ contenu: out.join("\n") + "\n" }) });
-      notif("Enregistre");
+      const r = await api(`/projets/${nom}/polices`, {
+        method: "PUT", body: JSON.stringify({ polices }) });
+      notif(`${r.enregistres} police(s) enregistrée(s)`);
       vuePolices(v);
     } catch (e) { notif(e.message, true); }
   });
@@ -1100,121 +1107,134 @@ async function vuePolices(v) {
 // --- glossaire ---
 async function vueGlossaire(v) {
   const nom = encodeURIComponent(S.actif);
-  let d;
-  try { d = await api(`/projets/${nom}/fichier/glossaire`); }
-  catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
+  let tous;
+  try {
+    tous = await api(`/projets/${nom}/glossaire`);
+  } catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
 
-  let lignes = csvLignes(d.contenu);
-  const tousPdfs = [...new Set(lignes.flatMap((l) => (l.source_pdf || "").split("|").filter(Boolean)))];
+  // filtre orphelines : un terme n'est orphelin que si TOUS ses PDF ont disparu
+  let lignes = S.filtreOrphelins
+    ? tous.filter((t) => t.orphelin)
+    : tous.filter((t) => !t.orphelin || !S.cacheMasque);
 
-  if (S.filtrePdf) {
-    lignes = lignes.filter((l) => (l.source_pdf || "").split("|").includes(S.filtrePdf));
-  }
-
-  const tri = S.tri;
-  const COLONNES = {
-    ordre: null, alpha: "source", pdf: "source_pdf", pages: "nb_pages",
-  };
-  // les tris d'en-tete priment sur la liste deroulante
+  // tri : le clic d'en-tete prime sur la liste deroulante
   const t = S.tris.glossaire;
   if (t.col && t.sens) {
-    lignes = appliquerTri(lignes, "glossaire", ["occurrences", "nb_pages"]);
-  } else if (tri !== "ordre") {
+    const num = ["occurrences", "nb_pages"].includes(t.col);
     lignes = [...lignes].sort((a, b) => {
-      if (tri === "alpha") return a.source.localeCompare(b.source, "fr");
-      if (tri === "pdf")
-        return (a.source_pdf || "zz").localeCompare(b.source_pdf || "zz")
-               || a.source.localeCompare(b.source, "fr");
-      if (tri === "pages")
-        return (Number(b.nb_pages) || 0) - (Number(a.nb_pages) || 0);
-      return 0;
+      const x = num ? (Number(a[t.col]) || 0) : String(a[t.col] ?? "").toLowerCase();
+      const y = num ? (Number(b[t.col]) || 0) : String(b[t.col] ?? "").toLowerCase();
+      const c = num ? x - y : x.localeCompare(y, "fr");
+      return c * t.sens;
     });
+  } else if (S.tri !== "ordre") {
+    const cmp = {
+      alpha: (a, b) => a.source.localeCompare(b.source, "fr"),
+      pdf: (a, b) => (a.sources[0]?.pdf || "zz").localeCompare(b.sources[0]?.pdf || "zz")
+                     || a.source.localeCompare(b.source, "fr"),
+      pages: (a, b) => (b.nb_pages || 0) - (a.nb_pages || 0),
+    }[S.tri];
+    if (cmp) lignes = [...lignes].sort(cmp);
   }
 
   const pieges = lignes.filter((l) => l.source && l.source === l.target);
+  const nOrphelins = tous.filter((x) => x.orphelin).length;
   const affiche = lignes.slice(0, 400);
-  // groupement vertical : uniquement quand on trie par PDF
-  const groupe = tri === "pdf" && !(t.col && t.sens);
+  const groupe = S.tri === "pdf" && !(t.col && t.sens);
 
   let html = `<div class="bloc">
-    <h2 class="titre">Glossaire — ${lignes.length} termes${S.filtrePdf ? " (filtre)" : ""}</h2>
+    <h2 class="titre">Glossaire — ${lignes.length} termes${S.filtreOrphelins ? " orphelins" : ""}</h2>
     ${pieges.length ? `<p style="color:var(--attention);margin:0 0 8px">
-      ⚠ ${pieges.length} terme(s) ou source = cible : le LLM sera force de ne pas les traduire.</p>` : ""}`;
+      ⚠ ${pieges.length} terme(s) où source = cible : le LLM sera forcé de ne pas les traduire.</p>` : ""}
+    ${nOrphelins ? `<p style="color:var(--attention);margin:0 0 8px">
+      ${nOrphelins} terme(s) orphelin(s) : aucun de leurs PDF source n'existe encore.
+      <button class="btn mini danger" id="purger-orph">Tout effacer</button></p>` : ""}`;
 
-  if (!d.contenu.trim()) {
-    html += `<p class="vide">Pas encore de glossaire. Lance l'etape Glossaire.</p></div>`;
+  if (!tous.length) {
+    html += `<p class="vide">Pas encore de glossaire. Lance l'étape Glossaire.</p></div>`;
     v.innerHTML = html;
     return;
   }
 
+  const pdfs = [...new Set(tous.flatMap((x) => x.sources.map((s) => s.pdf)))].sort();
+
   html += `<div class="rangee" style="margin-bottom:9px">
       <label class="rangee"><span class="faible">Trier</span>
         <select id="tri">
-          <option value="ordre" ${tri === "ordre" ? "selected" : ""}>Ordre trouve</option>
-          <option value="alpha" ${tri === "alpha" ? "selected" : ""}>Alphabetique</option>
-          <option value="pdf" ${tri === "pdf" ? "selected" : ""}>Par PDF</option>
-          <option value="pages" ${tri === "pages" ? "selected" : ""}>Par nombre de pages</option>
+          <option value="ordre" ${S.tri === "ordre" ? "selected" : ""}>Ordre trouvé</option>
+          <option value="alpha" ${S.tri === "alpha" ? "selected" : ""}>Alphabétique</option>
+          <option value="pdf" ${S.tri === "pdf" ? "selected" : ""}>Par PDF</option>
+          <option value="pages" ${S.tri === "pages" ? "selected" : ""}>Par nombre de pages</option>
         </select></label>
       <label class="rangee"><span class="faible">PDF</span>
         <select id="filtre">
           <option value="">tous</option>
-          ${tousPdfs.map((p) => `<option value="${echapper(p)}" ${p === S.filtrePdf ? "selected" : ""}>${echapper(p)}</option>`).join("")}
+          ${pdfs.map((x) => `<option value="${echapper(x)}" ${x === S.filtrePdf ? "selected" : ""}>${echapper(x)}</option>`).join("")}
         </select></label>
+      <label class="case" style="margin:0">
+        <input type="checkbox" id="orph-seulement" ${S.filtreOrphelins ? "checked" : ""}>
+        <span>orphelines seulement</span></label>
       <button class="btn" id="ajout">+ Ajouter</button>
       <button class="btn acc" id="sv-gloss">Enregistrer</button>
-      <button class="btn danger" id="suppr-tout">Tout supprimer</button>
     </div>
     <div class="scroll-tab"><table id="tab-gloss"><tr>
       ${entete("glossaire", "source", "Source", 'style="width:26%"')}
       ${entete("glossaire", "target", "Cible", 'style="width:26%"')}
       ${entete("glossaire", "occurrences", "Occ.")}
-      ${entete("glossaire", "nb_pages", "Pages")}
-      ${entete("glossaire", "source_pdf", "PDF d'origine")}
-      ${entete("glossaire", "origine", "Origine")}
+      <th>Pages</th>
+      ${entete("glossaire", "nb_pages", "Nb p.")}
+      ${entete("glossaire", "origines", "PDF d'origine")}
       <th></th>
     </tr>`;
 
   let dernierPdf = null;
   for (const l of affiche) {
-    // separateur vertical quand on groupe par PDF
     if (groupe) {
-      const pdf = (l.source_pdf || "(sans PDF)").split("|")[0];
+      const pdf = l.sources[0]?.pdf || "(sans PDF)";
       if (pdf !== dernierPdf) {
-        const n = affiche.filter((x) => (x.source_pdf || "(sans PDF)").split("|")[0] === pdf).length;
+        const n = affiche.filter((x) => (x.sources[0]?.pdf || "(sans PDF)") === pdf).length;
         html += `<tr class="groupe"><td colspan="7">${echapper(pdf)}
           <span class="faible" style="font-weight:400"> — ${n} terme(s)</span></td></tr>`;
         dernierPdf = pdf;
       }
     }
+    const srcs = l.sources.map((s) =>
+      `${echapper(s.pdf)} p${(s.pages || []).join(",")}` +
+      (s.etat === "absent" ? " (absent)" : "")).join(" · ");
     const piege = l.source && l.source === l.target ? ' style="color:var(--attention)"' : "";
-    html += `<tr${piege}>
+    html += `<tr${piege} data-id="${l.id}">
       <td><input type="text" data-src value="${echapper(l.source)}" style="width:100%"></td>
       <td><input type="text" data-tgt value="${echapper(l.target)}" style="width:100%"></td>
       <td class="faible">${echapper(l.occurrences || "—")}</td>
+      <td><input type="text" data-pages
+        value="${echapper(l.sources.flatMap((s) => s.pages).join(","))}"
+        style="width:100%" placeholder="6-10"></td>
       <td class="faible">${echapper(l.nb_pages || "—")}</td>
-      <td class="faible" style="font-size:11px">${echapper((l.source_pdf || "").replace(/\|/g, " · "))}</td>
-      <td><span class="tag ${echapper(l.origine || "auto")}">${echapper(l.origine || "auto")}</span></td>
+      <td class="faible" style="font-size:11px">${srcs || "—"}</td>
       <td><button class="btn mini" data-suppr>✕</button></td>
     </tr>`;
   }
   html += `</table></div>`;
   if (lignes.length > affiche.length) {
-    html += `<p class="faible">${lignes.length - affiche.length} terme(s) non affiche(s).
-      Affine le filtre pour les voir.</p>`;
+    html += `<p class="faible">${lignes.length - affiche.length} terme(s) non affiché(s).</p>`;
   }
   html += `</div>`;
   v.innerHTML = html;
 
   brancherTris(v, "glossaire", () => vueGlossaire(v));
-
   v.querySelector("#tri").addEventListener("change", (e) => {
     S.tri = e.target.value;
-    // la liste deroulante remet le tri d'en-tete a zero : sinon il gagnerait
     S.tris.glossaire = { col: null, sens: 0 };
     vueGlossaire(v);
   });
-  v.querySelector("#filtre").addEventListener("change", (e) => { S.filtrePdf = e.target.value; vueGlossaire(v); });
-
+  v.querySelector("#filtre").addEventListener("change", (e) => {
+    S.filtrePdf = e.target.value;
+    vueGlossaire(v);
+  });
+  v.querySelector("#orph-seulement").addEventListener("change", (e) => {
+    S.filtreOrphelins = e.target.checked;
+    vueGlossaire(v);
+  });
   v.querySelectorAll("[data-suppr]").forEach((b) =>
     b.addEventListener("click", () => b.closest("tr").remove()));
 
@@ -1222,47 +1242,47 @@ async function vueGlossaire(v) {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td><input type="text" data-src style="width:100%"></td>
       <td><input type="text" data-tgt style="width:100%"></td>
-      <td class="faible">—</td><td class="faible">—</td><td class="faible">—</td>
-      <td><span class="tag manuel">manuel</span></td>
+      <td class="faible">—</td><td><input type="text" data-pages style="width:100%"></td>
+      <td class="faible">—</td><td class="faible">—</td>
       <td><button class="btn mini" data-suppr>✕</button></td>`;
     v.querySelector("#tab-gloss").appendChild(tr);
     tr.querySelector("[data-suppr]").addEventListener("click", () => tr.remove());
     tr.querySelector("[data-src]").focus();
   });
 
-  v.querySelector("#suppr-tout").addEventListener("click", async () => {
-    if (!confirm(`Supprimer les ${lignes.length} termes du glossaire ?`)) return;
+  const purger = v.querySelector("#purger-orph");
+  if (purger) purger.addEventListener("click", async () => {
+    const ok = await confirmer(
+      "Effacer les orphelines",
+      `<p style="margin:0 0 8px">${nOrphelins} terme(s) dont aucun PDF source
+        n'existe encore seront <b>supprimés définitivement</b>.</p>`,
+      "Effacer");
+    if (!ok) return;
     try {
-      await api(`/projets/${nom}/fichier/glossaire`, {
-        method: "PUT",
-        body: JSON.stringify({ contenu:
-          "source,target,tgt_lng,source_pdf,pages,origine,occurrences,nb_pages\n" }) });
-      notif("Glossaire vide"); S.filtrePdf = ""; vueGlossaire(v);
+      const r = await api(`/projets/${nom}/glossaire/purger-orphelins`,
+        { method: "POST", body: "{}" });
+      notif(`${r.supprimes} terme(s) effacé(s)`);
+      chargerProjet(S.actif);
+      vueGlossaire(v);
     } catch (e) { notif(e.message, true); }
   });
 
   v.querySelector("#sv-gloss").addEventListener("click", async () => {
-    const out = [];
+    const termes = [];
     v.querySelectorAll("#tab-gloss tr").forEach((tr) => {
       if (tr.classList.contains("groupe")) return;
-      const s = tr.querySelector("[data-src]"), t = tr.querySelector("[data-tgt]");
-      if (!s || !t || !s.value.trim()) return;
-      const tds = tr.querySelectorAll("td");
-      out.push({
-        source: s.value.trim(), target: t.value.trim(), tgt_lng: "fr",
-        source_pdf: (tds[4]?.textContent || "").replace(/ · /g, "|").trim(),
-        pages: "", origine: "manuel",
-        occurrences: (tds[2]?.textContent || "").trim(),
-        nb_pages: (tds[3]?.textContent || "").trim(),
+      const s = tr.querySelector("[data-src]"), tg = tr.querySelector("[data-tgt]");
+      if (!s || !tg || !s.value.trim()) return;
+      termes.push({
+        id: tr.dataset.id ? Number(tr.dataset.id) : null,
+        source: s.value.trim(), target: tg.value.trim(), tgt_lng: "fr",
       });
     });
-    const enteteCsv = "source,target,tgt_lng,source_pdf,pages,origine,occurrences,nb_pages";
-    const csv = enteteCsv + "\n" + out.map((r) =>
-      [r.source, r.target, r.tgt_lng, r.source_pdf, r.pages, r.origine,
-       r.occurrences, r.nb_pages].map(csvChamp).join(",")).join("\n") + "\n";
     try {
-      await api(`/projets/${nom}/fichier/glossaire`, { method: "PUT", body: JSON.stringify({ contenu: csv }) });
-      notif("Glossaire enregistre");
+      const r = await api(`/projets/${nom}/glossaire`, {
+        method: "PUT", body: JSON.stringify({ termes }) });
+      notif(`${r.enregistres} terme(s) enregistré(s) — origine passée à manuel`);
+      vueGlossaire(v);
     } catch (e) { notif(e.message, true); }
   });
 }
