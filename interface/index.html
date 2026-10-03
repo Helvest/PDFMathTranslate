@@ -828,15 +828,17 @@ function champModele(cle, libelle, aide = "") {
     if (!t) return S.modeles.slice(0, 20);
     return S.modeles.filter((m) => m.toLowerCase().includes(t)).slice(0, 20);
   };
+  // perfModeles renvoie des VALEURS, pas des listes : p.lat est un nombre.
+  // L'ancien code faisait p.lat.reduce(...) — une exception qui vidait
+  // silencieusement tout l'onglet Options.
   const detail = (m) => {
     const p = perf.get(m);
     if (!p) return "";
-    const lat = (p.lat.reduce((a, b) => a + b, 0) / p.lat.length).toFixed(1);
-    const tok = p.tok.length
-      ? " · " + Math.round(p.tok.reduce((a, b) => a + b, 0) / p.tok.length) + " tok"
-      : "";
+    const lat = Number(p.lat).toFixed(1);
+    const tok = p.tok ? " · " + Math.round(Number(p.tok)) + " tok" : "";
     const echec = echecsModeles().get(m);
-    return echec ? `✕ ${echec}` : `${lat}s${tok}`;
+    if (echec) return `\u2715 ${echec}`;
+    return `${lat}s${tok} · score ${p.exploitables || "—"}`;
   };
 
   const d = S.modeles.find((m) => m === courant);
@@ -1677,8 +1679,21 @@ async function vueBanc(v, colTri) {
       <button class="btn" id="b-rafraichir">Rafraichir</button>
       <span class="faible">${res.modeles ? res.modeles.length : 0} resultat(s)</span>
     </div>
+    ${enCours ? `
+      <div style="margin:7px 0 3px">
+        <div class="barre-prog" title="Scenarios deja mesures">
+          <i style="width:${etat.total ? Math.min(100, (etat.fait / etat.total) * 100) : 0}%"></i>
+        </div>
+        <p class="faible" style="margin:0 0 5px;font-size:10.5px">
+          ${etat.fait || 0}/${etat.total || 0} mesures</p>
+      </div>
+      <div style="margin:3px 0">
+        <div class="barre-prog" title="Mesure en cours">
+          <i id="b-attente" style="width:100%"></i>
+        </div>
+      </div>` : ""}
+    ${etat.log ? `<div class="log" id="log-banc" style="max-height:110px">${echapper(etat.log)}</div>` : ""}
     ${etat.erreur ? `<p class="vide">${echapper(etat.erreur)}</p>` : ""}
-    ${etat.log ? `<div class="log" style="max-height:120px">${echapper(etat.log)}</div>` : ""}
   </div>`;
 
   // ---------- les leviers ----------
@@ -1715,8 +1730,23 @@ async function vueBanc(v, colTri) {
           </div>
           <!-- les leviers avances : ils changent le fond de la reponse. Vides par
                defaut, donc le modele choisit — sauf si tu les remplis. -->
+          <div class="rangee" style="margin-top:9px">
+            <label class="rangee"><span class="faible">Données de test</span>
+              <select id="b-source">
+                <option value="">Texte fixe — hors projet, comparable partout</option>
+                ${(S.projets || []).map((p) =>
+                  `<option value="${echapper(p.nom || p)}">Page d'un PDF du projet ${
+                    echapper(p.nom || p)}</option>`).join("")}
+              </select></label>
+          </div>
           <details style="margin-top:8px">
             <summary class="faible" style="cursor:pointer">Leviers avances</summary>
+            <label class="case" style="display:block;margin:7px 0">
+              <input type="checkbox" id="b-reasoning">
+              <span>include_reasoning — montrer le raisonnement dans la réponse
+                <span class="faible">— utile pour voir pourquoi il a choisi un
+                terme, mais ça allonge la sortie</span></span>
+            </label>
             <div class="rangee" style="margin-top:7px">
               <label class="rangee"><span class="faible">top_p</span>
                 <input type="number" id="b-topp" placeholder="aucun" min="0" max="1" step="0.05"
@@ -1762,14 +1792,39 @@ async function vueBanc(v, colTri) {
         </details>` : ""}
   </div>`;
 
-  // ---------- les modeles ----------
-  const libres = cat.modeles || [];
-  const gratuits = libres.filter((m) => m.gratuit).length;
+  // ---------- les scenarios ----------
+  // Chacun se teste seul. "Charge" est un scenario a part : elle dit combien
+  // d'agents le modele encaisse, et sort dans le meme comparatif.
   html += `<div class="bloc">
-    <h2 class="titre">Modeles — ${libres.length} proposes, ${gratuits} gratuits</h2>
+    <h2 class="titre">Scenarios a tester</h2>
+    <p class="faible" style="margin:0 0 7px">
+      Chaque scenario se mesure sur les memes modeles, avec les memes leviers.
+      Decoche ce que tu ne veux pas mesurer — le banc va plus vite.</p>
+    <div class="rangee" style="margin-bottom:7px">
+      <button class="btn mini" id="b-sc-tous">Tous</button>
+      <button class="btn mini" id="b-sc-aucun">Aucun</button>
+    </div>
+    ${[["traduction", "Traduction", "le texte source vers le français"],
+       ["glossaire", "Glossaire", "termes, traduction, définition"],
+       ["contexte", "Contexte", "le résumé que lit le pipeline"],
+       ["polices", "Polices", "les polices de remplacement à chercher"],
+       ["charge", "Charge", "combien d'agents en même temps"]]
+      .map(([cle, nom, aide]) => `<label class="case" style="display:block">
+        <input type="checkbox" data-sc="${cle}" checked>
+        <span><b>${nom}</b> <span class="faible">— ${aide}</span></span>
+      </label>`).join("")}
+    ${S.bancScenarios && S.bancScenarios.includes("charge") ? "" : ""}
+  </div>`;
+
+  // ---------- les modeles ----------
+  // seulement les modeles gratuits : ce sont les seuls qui nous interessent,
+  // et 425 modeles a parcourir pour en trouver 3 n'aide personne
+  const libres = (cat.modeles || []).filter((m) => m.gratuit);
+  html += `<div class="bloc">
+    <h2 class="titre">Modeles gratuits — ${libres.length}</h2>
     <div class="rangee" style="margin-bottom:7px">
       <input type="text" id="b-filtre" placeholder="filtrer…" style="flex:1;min-width:120px">
-      <button class="btn mini" id="b-gratuits">Gratuits</button>
+      <button class="btn mini" id="b-gratuits">Tout cocher</button>
       <button class="btn mini" id="b-aucun">Tout decocher</button>
     </div>
     <div class="scroll" style="max-height:230px;columns:2" id="b-liste">
@@ -1922,9 +1977,19 @@ async function vueBanc(v, colTri) {
     repetition_penalty: v.querySelector("#b-rep")?.value || null,
     stop: v.querySelector("#b-stopseq")?.value || null,
     repetitions: Number(v.querySelector("#b-repet")?.value) || 3,
+    include_reasoning: !!v.querySelector("#b-reasoning")?.checked,
     timeout: Number(v.querySelector("#b-timeout")?.value) || 180,
   });
 
+  // ---------- les scenarios choisis ----------
+  const _scenariosChoisis = () =>
+    [...v.querySelectorAll("[data-sc]:checked")].map((c) => c.dataset.sc);
+  v.querySelector("#b-sc-tous")?.addEventListener("click", () =>
+    v.querySelectorAll("[data-sc]").forEach((c) => (c.checked = true)));
+  v.querySelector("#b-sc-aucun")?.addEventListener("click", () =>
+    v.querySelectorAll("[data-sc]").forEach((c) => (c.checked = false)));
+  // ---------- fin scenarios ----------
+  
   // ---------- le bouton de charge ----------
   const cl = v.querySelector("#c-lancer");
   if (cl) cl.addEventListener("click", async () => {
@@ -1937,6 +2002,7 @@ async function vueBanc(v, colTri) {
       await api("/banc/charge/lancer", { method: "POST", body: JSON.stringify({
         modeles: [modeles[0]],   // la charge se mesure sur un modele a la fois
         niveaux,
+        projet: v.querySelector("#b-source")?.value || "",
         ..._leviersUI(),
       }) });
       notif(`Charge : ${modeles[0]}`);
@@ -1965,20 +2031,23 @@ async function vueBanc(v, colTri) {
     catch (e) { notif(e.message, true); }
   });
   v.querySelector("#b-rafraichir")?.addEventListener("click", () => vueBanc(v));
-  v.querySelector("#b-aucun")?.addEventListener("click", () =>
-    v.querySelectorAll("[data-mod]").forEach((c) => (c.checked = false)));
-  v.querySelector("#b-gratuits")?.addEventListener("click", () =>
-    v.querySelectorAll("[data-mod]").forEach((c) => {
-      const m = (S.bancCatalogue?.modeles || []).find((x) => x.id === c.dataset.mod);
-      c.checked = !!m?.gratuit;
-    }));
+  v.querySelector("#b-aucun")?.addEventListener("click", () => {
+    v.querySelectorAll("[data-mod]").forEach((c) => (c.checked = false));
+    vueBanc(v);
+  });
+  v.querySelector("#b-gratuits")?.addEventListener("click", () => {
+    // la liste ne contient que des gratuits : "tout cocher" les coche tous
+    v.querySelectorAll("[data-mod]").forEach((c) => (c.checked = true));
+    vueBanc(v);
+  });
   v.querySelector("#b-filtre")?.addEventListener("input", (e) => {
     const q = e.target.value.toLowerCase();
     v.querySelectorAll("#b-liste .case").forEach((l) => {
       l.style.display = l.dataset.nom.includes(q) ? "" : "none";
     });
   });
-  // le choix du modele pilote les leviers disponibles
+  // cocher un modele met a jour la fiche ET le comparatif immediatement :
+  // tu veux voir le resultat en cochant, pas en redemarrant
   v.querySelectorAll("[data-mod]").forEach((c) =>
     c.addEventListener("change", () => vueBanc(v)));
 }
@@ -2118,16 +2187,23 @@ function suivreBanc() {
       const d = await api("/banc/resultats");
       const etat = d.etat || {};
       S.banc = d;
+
+      // la barre avance SANS redessiner : un redessin effacerait les cases
+      // a cocher au moment ou l'utilisateur en decoche une
+      const pct = etat.total ? Math.min(100, ((etat.fait || 0) / etat.total) * 100) : 0;
+      const barre = document.querySelector("#vue .barre-prog i");
+      if (barre) barre.style.width = pct + "%";
+      const detail = document.querySelector("#vue .barre-prog")?.nextElementSibling;
+      if (detail) detail.textContent = `${etat.fait || 0}/${etat.total || 0} mesures`;
       const log = document.querySelector("#log-banc");
       if (log && etat.log) { log.textContent = etat.log; log.scrollTop = log.scrollHeight; }
-      // on ne redessine que quand le banc se termine : sinon le redessin
-      // efface le curseur et les cases a cocher pendant qu'on clique
+
       if (etat.etat !== "en_cours" && S.bancEtat === "en_cours") {
         vueBanc($("#vue"));
-        notif("Banc termine");
+        notif(`Banc terminé — ${etat.fait || 0} mesures`);
       }
       S.bancEtat = etat.etat;
-    } catch (e) { /* ignore */ }
+    } catch (e) { /* le serveur a peut-etre redemarre */ }
   }, 2000);
 }
 

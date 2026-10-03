@@ -158,13 +158,22 @@ def _construire(modele: dict, leviers: dict, prompt: str) -> dict:
     # la repetition est ce qui fait boucler un modele sur du JSON
     _met("repetition_penalty", "repetition_penalty")
 
+    # include_reasoning est l'inverse de "effort" : il dit si on VOIT le
+    # raisonnement dans la reponse. Les deux se combinent.
+    inclure = leviers.get("include_reasoning")
     if modele.get("efforts"):
         if leviers.get("effort"):
-            corps["reasoning"] = {"enabled": True, "effort": leviers["effort"]}
+            corps["reasoning"] = {"enabled": True, "effort": leviers["effort"],
+                                  "include_reasoning": bool(inclure)}
     elif modele.get("raisonnement_obligatoire"):
         # le modele impose le raisonnement sans dire ses niveaux : on demande
         # le raisonnement, sans effort (un effort parapluie fait tout refuser)
         corps["reasoning"] = {"enabled": True}
+        if inclure:
+            corps["reasoning"]["include_reasoning"] = True
+    elif inclure:
+        # pas de raisonnement demande, mais on veut le voir s'il y en a
+        corps["include_reasoning"] = True
     return corps
 
 
@@ -341,15 +350,42 @@ def noter(scenario: str, source: str, r: dict) -> dict:
 
 # ---------------------------------------------------------------- scenarios
 
-def _page_de_test() -> tuple[str, str, str]:
-    """Une vraie page d'un vrai PDF, et son nom."""
-    if not SOURCE.is_dir():
-        return ("Texte de test.\n\nThe Lowland Wastes hold many secrets.", "test.pdf", "1")
-    pdf = sorted(SOURCE.glob("*.pdf"))[0]
-    doc = pymupdf.open(str(pdf))
-    txt = doc[0].get_text()
-    doc.close()
-    return txt, pdf.name, "1"
+def _page_de_test(source: Path = SOURCE, projet: str | None = None) -> tuple[str, str, str]:
+    """Une vraie page d'un vrai PDF, et son nom.
+
+    Deux sources au choix :
+      - source=None : un texte de repli, hors de tout projet
+      - source=<dossier> + projet=<nom> : une page d'un projet precis
+
+    Le choix est explicite parce qu'il change ce qu'on mesure : un glossaire
+    sur une feuille de personnage n'a rien a voir avec un glossaire sur le
+    roman. Sans le dire, on compare toujours le meme texte.
+    """
+    dossier = source
+    if projet:
+        # SOURCE = Projets/<nom>/source : le dossier des projets est deux
+        # niveaux au-dessus, pas un
+        racine = SOURCE.parent.parent if SOURCE.name == "source" else SOURCE.parent
+        dossier = racine / projet / "source"
+        if not dossier.is_dir():
+            raise ValueError(f"projet sans dossier source : {dossier}")
+
+    if dossier and dossier.is_dir():
+        pdfs = sorted(p for p in dossier.glob("*.pdf") if not p.name.startswith("~$"))
+        if pdfs:
+            pdf = pdfs[0]
+            doc = pymupdf.open(str(pdf))
+            txt = doc[0].get_text()
+            doc.close()
+            return txt, pdf.name, "1"
+
+    # repli hors projet : du texte qui ressemble a une page de jeu
+    return (
+        "The Lowland Wastes hold many secrets. Cloud Empress watches from the "
+        "ridge, counting the smoke of the last convoy. The tithing altar still "
+        "stands, though no one has paid tribute in years.\n"
+        "Mark all party successes (S) and failures (F) chronologically below.",
+        "repli.txt", "1")
 
 
 def prompt_scenario(scenario: str, texte: str, doc: str, page: str) -> str:
@@ -468,6 +504,70 @@ def _repetitions(mesures: list[dict]) -> dict:
     return out
 
 
+def banc_charge(modele_id: str, niveaux: list[int], leviers: dict,
+                timeout: int = 180, source: Path = SOURCE,
+                projet: str | None = None, progres=None) -> dict:
+    """La charge, presentee comme un scenario, avec un score.
+
+    On mesure jusqu'ou le modele encaisse le parallele, et on note :
+      100  = aucun palier n'a perdu d'appel
+      70   = le premier palier qui casse, au-dela c'est inutile
+      40   = ca casse des le premier
+
+    Le score est ce qu'on compare entre modeles : 6 agents tenus a 100 vaut
+    mieux que 24 agents tenus a 70.
+    """
+    cat = {m["id"]: m for m in catalogue()}
+    modele = cat.get(modele_id)
+    if not modele:
+        return {"ok": False, "erreur": f"modele inconnu : {modele_id}"}
+
+    lignes = []
+    for n in niveaux:
+        r = mesurer_charge(modele, n, max(n, 3), leviers, timeout, source)
+        lignes.append(r)
+        if progres:
+            progres({"fait": len(lignes), "total": len(niveaux), "etape": "charge"})
+        if r["nb_ok"] < r["blocs"]:
+            break
+
+    tenu = max((r["n_agents"] for r in lignes if r["nb_ok"] == r["blocs"]), default=0)
+    total = lignes[-1]["n_agents"] if lignes else 0
+    if total and tenu == total:
+        score = 100
+    elif tenu == 0:
+        score = 40          # ca casse des le premier palier
+    else:
+        score = 70          # ca tient un moment, puis casse
+
+    # la latence, c'est celle du DERNIER palier tenu : c'est le debit qu'on
+    # aurait reellement en production
+    tenues = [r for r in lignes if r["nb_ok"] == r["blocs"]]
+    lat = tenues[-1]["total_s"] if tenues else (lignes[0]["total_s"] if lignes else None)
+
+    return {
+        "scenario": "charge",
+        "ok": True,
+        "latence": lat,
+        "score": score,
+        "criteres": {
+            "aucun palier casse": tenu == total,
+            "au moins 4 agents": tenu >= 4,
+            "aucune troncature": all(not r["tronques"] for r in lignes),
+        },
+        "niveaux": lignes,
+        "tenu": tenu,
+        "niveaux_testes": total,
+        "termes": sum(r["termes"] for r in tenues),
+        "stats": {"lat": {"moy": lat, "min": None, "max": None,
+                          "ecart": max((r["total_s"] for r in tenues), default=0)
+                          - min((r["total_s"] for r in tenues), default=0)}},
+        "repetitions": 1,
+        "sortie_brute": "",
+        "erreurs": sorted({e[:70] for r in lignes for e in r["erreurs"]})[:3],
+    }
+
+
 # ---------------------------------------------------------------- execution
 
 def mesurer(modele: dict, scenario: str, leviers: dict, texte: str,
@@ -536,9 +636,17 @@ def _resume(reponses: list[dict]) -> dict:
 
 
 def lancer(modeles: list[dict], leviers: dict, scenarios=SCENARIOS,
-           timeout: int = 180, repetitions: int = 1) -> dict:
-    """Tous les modeles, tous les scenarios, en parallele."""
-    texte, doc, page = _page_de_test()
+           timeout: int = 180, repetitions: int = 1,
+           source: Path = SOURCE, projet: str | None = None,
+           avec_charge: bool = False, charge_niveaux: list[int] | None = None,
+           progres=None) -> dict:
+    """Tous les modeles, tous les scenarios, en parallele.
+
+    avec_charge ajoute la CHARGE comme un scenario de plus : elle apparait
+    alors dans le comparatif, avec son propre score. C'est ce qu'on veut quand
+    on compare des modeles — savoir combien d'agents chacun encaisse.
+    """
+    texte, doc, page = _page_de_test(source, projet)
     tasks = [(m, s) for m in modeles for s in scenarios]
     brut: dict[tuple[str, str], dict] = {}
 
@@ -552,10 +660,21 @@ def lancer(modeles: list[dict], leviers: dict, scenarios=SCENARIOS,
         for f in as_completed(futs):
             m, s = futs[f]
             brut[(m, s)] = f.result()
+            if progres:
+                # fait/total sur les scenarios : une barre qui avance
+                progres({"fait": len(brut), "total": len(futs), "etape": s})
 
+    noms_all = list(scenarios) + (["charge"] if avec_charge else [])
     par_modele = []
     for m in modeles:
         reps = [brut.get((m["id"], s), {}) for s in scenarios]
+
+        # la charge, si demandee : un pseudo-scenario avec les memes cles, pour
+        # qu'elle se trie et s'affiche comme les autres
+        if avec_charge:
+            r = banc_charge(m["id"], charge_niveaux or [1, 2, 4, 8], leviers,
+                            timeout, source, projet, progres)
+            reps.append(r)
         scores = [r["score"] for r in reps if r.get("score") is not None]
         ligne = {"modele": m["id"], "nom": m.get("nom", ""),
                  "effort": leviers.get("effort") or "aucun",
@@ -563,14 +682,16 @@ def lancer(modeles: list[dict], leviers: dict, scenarios=SCENARIOS,
                  # permet de classer d'un coup d'oeil.
                  "score": round(statistics.mean(scores)) if scores else 0,
                  **_resume(reps)}
-        for s, r in zip(scenarios, reps):
+        for s, r in zip(noms_all, reps):
             ligne[s] = r
         par_modele.append(ligne)
 
+    noms = list(scenarios) + (["charge"] if avec_charge else [])
     return {
         "maj": datetime.now().isoformat(timespec="seconds"),
         "leviers": leviers,
         "repetitions": repetitions,
+        "scenarios": noms,
         "texte_car": len(texte),
         "pdf": doc,
         "modeles": par_modele,

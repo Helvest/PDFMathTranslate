@@ -1323,7 +1323,8 @@ def _proxy_actif() -> bool:
 # Un seul outil de test. banc.py pilote tout : catalogue, leviers, scenarios,
 # mesures. Le serveur ne fait que relayer — la logique reste testable seule.
 
-BANC: dict = {"etat": "pret", "log": "", "debut": None, "erreur": ""}
+BANC: dict = {"etat": "pret", "log": "", "debut": None, "erreur": "",
+             "fait": 0, "total": 0}
 
 
 @app.get("/api/banc/catalogue")
@@ -1390,6 +1391,9 @@ def _leviers(payload: dict, modele: dict, banc) -> dict:
         "seed": _nombre("seed"),
         "stop": payload.get("stop") or None,
         "repetition_penalty": _nombre("repetition_penalty"),
+        # include_reasoning est l'inverse de "effort" : il dit si on VOIT
+        # le raisonnement dans la reponse
+        "include_reasoning": bool(payload.get("include_reasoning")),
     }
 
 
@@ -1423,7 +1427,7 @@ def api_banc_charge_lancer(payload: dict):
     modele = choisis[0]
     leviers = _leviers(payload, modele, banc)
     timeout = int(payload.get("timeout") or 180)
-    BANC.update(etat="en_cours", log="", erreur="",
+    BANC.update(etat="en_cours", log="", erreur="", fait=0, total=0,
                 debut=datetime.now().isoformat(timespec="seconds"))
 
     def _travail():
@@ -1488,13 +1492,43 @@ def api_banc_lancer(payload: dict):
     # on ne voit pas la stabilite — qui est justement ce qu'on cherche.
     repetitions = max(1, min(10, int(payload.get("repetitions") or 3)))
 
+    # quels scenarios, choisis un par un. "charge" est un scenario a part
+    # entiere : elle apparait dans le comparatif avec son propre score.
+    demandes = payload.get("scenarios") or list(banc.SCENARIOS)
+    scenarios = [s for s in demandes if s in banc.SCENARIOS]
+    avec_charge = "charge" in demandes
+    if not scenarios and not avec_charge:
+        raise HTTPException(400, "aucun scenario valide")
+    charge_niveaux = [int(n) for n in (payload.get("charge_niveaux") or [1, 2, 4, 8])]
+
+    # la source des donnees : un texte fixe, ou une page d'un projet
+    projet = payload.get("projet") or None
+    source = banc.SOURCE if projet else None
+
     BANC.update(etat="en_cours", log="", erreur="",
                 debut=datetime.now().isoformat(timespec="seconds"))
 
     def _travail():
         try:
-            r = banc.lancer(choisis, leviers, timeout=timeout,
-                            repetitions=repetitions)
+            # le total : scenarios par modele, plus les paliers de charge
+            total = len(choisis) * (len(scenarios) + (len(charge_niveaux) if avec_charge else 0))
+            BANC["total"] = total
+
+            def _prog(p):
+                # un banc dure plusieurs minutes : on montre ou on en est.
+                # "fait" est global (tous modeles confondus), la barre suit.
+                BANC["fait"] = p.get("fait", BANC.get("fait", 0))
+                if "n_agents" in p:
+                    BANC["log"] = (f"{p['n_agents']} agents : {p['reussis']} "
+                                   f"en {p['total_s']}s, gain {p['gain']}x")
+                else:
+                    BANC["log"] = f"{p.get('etape', '')} — {p['fait']}/{p['total']}"
+
+            r = banc.lancer(choisis, leviers, scenarios=scenarios,
+                            timeout=timeout, repetitions=repetitions,
+                            source=source, projet=projet,
+                            avec_charge=avec_charge, charge_niveaux=charge_niveaux,
+                            progres=_prog if avec_charge else None)
             banc.BENCH.mkdir(parents=True, exist_ok=True)
             banc.RESULTATS.write_text(
                 json.dumps(r, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")

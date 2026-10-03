@@ -128,8 +128,11 @@ def test_leviers() -> None:
     }
     c = banc._construire(modele, {"effort": "low", "max_tokens": 16000,
                                   "temperature": 0}, "prompt")
-    _verifie(c["reasoning"] == {"enabled": True, "effort": "low"},
-             "l'effort demande n'est pas passe")
+    # include_reasoning accompagne l'effort : c'est le meme bloc, pas un
+    # parametre a part
+    _verifie((c["reasoning"] or {}).get("enabled") is True
+             and c["reasoning"].get("effort") == "low",
+             f"l'effort demande n'est pas passe : {c.get('reasoning')}")
     _verifie(c["max_tokens"] == 16000, "max_tokens non passe")
     _verifie(c["temperature"] == 0, "temperature non passee")
 
@@ -576,6 +579,40 @@ def test_score() -> None:
         _verifie(0 <= v <= 100, f"score hors bornes pour {sc} : {v}")
 
 
+def test_include_reasoning() -> None:
+    """include_reasoning dit si on VOIT le raisonnement dans la reponse.
+
+    C'est l'inverse de "effort" : effort raisonne, include_reasoning montre.
+    Les deux se combinent dans le bloc reasoning.
+    """
+    modele = {"id": "x/y", "efforts": ["low"], "raisonnement_obligatoire": True,
+              "parametres": ["max_tokens", "temperature"]}
+
+    c = banc._construire(modele, {"effort": "low", "max_tokens": 100,
+                                  "temperature": 0,
+                                  "include_reasoning": True}, "p")
+    _verifie((c["reasoning"] or {}).get("include_reasoning") is True,
+             "include_reasoning=True n'est pas passe")
+
+    c2 = banc._construire(modele, {"effort": "low", "max_tokens": 100,
+                                   "temperature": 0,
+                                   "include_reasoning": False}, "p")
+    _verifie((c2["reasoning"] or {}).get("include_reasoning") is False,
+             "include_reasoning=False doit etre passe explicitement")
+
+    # un modele qui impose le raisonnement mais ne liste pas ses niveaux :
+    # on demande quand meme, sans effort (un effort parapluie est refuse)
+    sans = {"id": "z", "efforts": [], "raisonnement_obligatoire": True,
+            "parametres": ["max_tokens", "temperature"]}
+    c3 = banc._construire(sans, {"effort": "low", "max_tokens": 100,
+                                 "temperature": 0,
+                                 "include_reasoning": True}, "p")
+    _verifie("effort" not in (c3.get("reasoning") or {}),
+             f"aucun effort ne doit partir : {c3.get('reasoning')}")
+    _verifie((c3.get("reasoning") or {}).get("include_reasoning") is True,
+             "include_reasoning doit survivre sans effort")
+
+
 def test_repetitions() -> None:
     """La repetition doit montrer la stabilite, pas seulement la moyenne."""
     # des latences stables
@@ -614,7 +651,8 @@ def main() -> int:
                test_leviers_supports, test_qualite,
                test_scenarios, test_resume, test_charge,
                test_reprise_reponse_vide, test_leviers_api,
-               test_score, test_repetitions):
+               test_score, test_repetitions,
+               test_include_reasoning):
         fn()
 
     if "--reseau" in sys.argv:

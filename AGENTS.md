@@ -259,6 +259,21 @@ Deux défauts distincts se cachent là :
 - les **0 terme** viennent de `max_tokens=4000` : le raisonnement consomme
   tout le budget et coupe le JSON. Plus on réfléchit, moins il reste de place.
 
+`include_reasoning` est le réglage inverse de `effort` : `effort` décide **si**
+le modèle raisonne, `include_reasoning` décide si **on voit** le raisonnement.
+Les deux vont dans le même bloc `reasoning`.
+
+Le Banc (onglet du panneau de gauche) mesure : les 4 scénarios de production
+avec leurs vrais prompts, la **charge** comme un scénario à part entière, et un
+**score sur 100** par scénario. Le score juge l'utilisabilité — troncature,
+balises, JSON valide — pas le style. Les critères ratés sont affichés, pour
+savoir lequel. Chaque scénario se répète N fois (3 par défaut) : l'écart-type
+distingue un modèle stable d'un modèle chanceux.
+
+La source des données est explicite : un texte fixe (hors projet, comparable
+partout) ou une page d'un projet choisi. Mesurer un glossaire sur une feuille
+de personnage n'a rien à voir avec le mesurer sur le roman.
+
 Deux choses à savoir sur le proxy :
 - il rend parfois une **réponse vide** avec `finish_reason=stop`, sans erreur
   et avec les tokens rapportés — mesuré à 1 appel sur 8. `banc.appeler()`
@@ -267,10 +282,10 @@ Deux choses à savoir sur le proxy :
   l'utilisateur a réglés **et** que le modèle supporte : un paramètre non
   supporté fait refuser la requête entière.
 
-`/v1/models` est la source de vérité : contexte, `supported_parameters`,
-`reasoning.supported_efforts`, prix, expiration. Le catalogue garde le modèle
-complet sous `brut` — ne pas le filtrer, un champ jeté est une information
-perdue.
+`/v1/models` est la source de vérité. Le catalogue garde le modèle complet
+sous `brut` — ne pas le filtrer, un champ jeté est une information perdue.
+Et ne pas comparer les valeurs d'un appel à l'autre : le proxy renvoie des
+prix différents pour le même modèle.
 
 ## 9. Ajouter une étape
 
