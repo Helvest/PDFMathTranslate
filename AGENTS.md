@@ -13,6 +13,9 @@ vrai **maintenant**, pas ce qui était prévu.
 ```
 Traduction AI V2/              <- la racine, hors du dépôt git
 ├── PDFMathTranslate/         LE DÉPÔT (code, versionné)
+│   ├── base.py              schéma SQLite et accès par projet
+│   ├── registre.py          présence, mode, réassociation, purge
+│   ├── donnees.py           glossaire, polices, orphelins, export CSV
 │   ├── analyser.py           passe d'analyse : contexte, polices, glossaire
 │   ├── bench.py              test de performance des modèles
 │   ├── traduire.sh           traduction (backend v2)
@@ -31,11 +34,9 @@ Traduction AI V2/              <- la racine, hors du dépôt git
 │   ├── traduits/             les PDF traduits
 │   ├── downloads/            archives de polices téléchargées
 │   └── analyse/
+│       ├── etat.db          TOUT l'état : contexte, glossaire, polices
 │       ├── consignes-contexte.md   ce que l'utilisateur sait (lu par le LLM)
 │       ├── consignes-polices.md   idem, pour les polices
-│       ├── contexte/               un .json par PDF + _lot.json
-│       ├── glossaire.csv
-│       ├── polices.csv
 │       ├── polices/                les .ttf de remplacement du projet
 │       └── *.log                   logs des étapes
 │
@@ -80,9 +81,9 @@ Ne jamais enchaîner automatiquement : la qualité en dépend.
 
 | Étape | Sans LLM ? | Produit | Clef |
 |---|---|---|---|
-| **Contexte** | non | `analyse/contexte/<pdf>.json` + `_lot.json` | LLM + consignes |
-| **Polices** | non (LLM pour la recherche) | `analyse/polices.csv`, archives dans `downloads/` | aucun pour la détection |
-| **Glossaire** | non | `analyse/glossaire.csv` | LLM + contexte |
+| **Contexte** | non | table `contexte` + `page_contexte` | LLM + consignes |
+| **Polices** | non (LLM pour la recherche) | tables `police` + `police_polices` | aucun pour la détection |
+| **Glossaire** | non | tables `glossaire` + `page_glossaire` | LLM + contexte |
 | **Traduire** | non | `traduits/*.pdf` | glossaire + polices |
 
 **Règles de parallélisation** (dans `serveur.py`, `CONFLITS`) :
@@ -146,27 +147,70 @@ l'exécution :
 
 ## 5. Le glossaire, en détail
 
-C'est le fichier le plus subtil du projet.
-
-**Colonnes** : `source,target,tgt_lng,source_pdf,pages,origine,occurrences,nb_pages`
+**Tables** : `glossaire` (le terme) et `page_glossaire` (d'où il vient).
 
 `source == target` signifie « ne pas traduire » (nom propre, code). **3 cas
 légitimes sur 71** : `Farmerling`, `Imago`, `plastisteel`. Le prompt interdit
 ce cas par défaut ; le nombre est un indicateur de qualité du prompt.
 
-`pages` a été ajouté tardivement : les termes des runs antérieurs ont la
-colonne vide. C'est normal.
+**Un terme n'est orphelin que si TOUS ses PDF ont disparu** — c'est une
+requête, pas un drapeau :
 
-`occurrences` et `nb_pages` comptent dans **tous** les PDF du projet, pas
-seulement ceux du run courant.
+```sql
+WHERE NOT EXISTS (SELECT 1 FROM page_glossaire pg JOIN pdf p ON p.id = pg.pdf_id
+                  WHERE pg.glossaire_id = g.id)
+```
+
+C'est tout l'intérêt du modèle : un terme trouvé dans 3 PDF survit à la
+disparition de 2 d'entre eux.
 
 L'extraction **automatique est désactivée** : elle produit des entrées
-`source == target` qui forcent la non-traduction et dégradent le résultat.
-`traduire.sh` passe `--no-auto-extract-glossary` en dur.
+`source == cible` qui forcent la non-traduction et dégradent le résultat.
 
----
+## 6. La base et le registre
 
-## 6. Les polices, en détail
+**Tout est dans `Projets/<nom>/analyse/etat.db`.** Pas de CSV, pas de JSON :
+un seul fichier, des relations.
+
+Le CSV du glossaire n'existe que le temps d'une traduction, dans un fichier
+temporaire, parce que `babeldoc/glossary.py` ne lit que
+`source, target, target_language`. Un `trap EXIT` le supprime, même en cas
+d'échec. `Global/polices.csv` est le seul CSV permanent : il est partagé
+entre projets et modifié à la main.
+
+### Ce que tout se rattache à l'empreinte, jamais au nom
+
+`pdf.empreinte` est le hash du **texte** normalisé, pas des octets. Deux
+exports du même document diffèrent au niveau octet mais ont le même texte —
+c'est le seul moyen de reconnaître un renommage ou un ré-export.
+
+Conséquence vérifiée : renommer `Slipsinger.pdf` en `Slipsinger v2.pdf` à la
+main, rattacher les deux fiches, et les **7 polices liées suivent**.
+
+`pdf_noms` garde tous les noms portés par un PDF, donc
+`pdf_par_nom(con, ancien)` continue de trouver après un renommage.
+
+### Les deux tables many-to-many
+
+`page_glossaire` et `police_polices` portent les sources. C'est ce qui rend
+l'orphelin calculable au lieu d'être un drapeau à maintenir : supprimer un
+PDF se répercute partout, sans balayer quoi que ce soit.
+
+### Quatre règles qui ont déjà coûté du temps
+
+1. **`_suivre` n'écrase pas un état posé à la main.** Une pause termine le
+   processus, donc son code de retour n'est pas un échec : si `_suivre`
+   écrivait `erreur`, le bouton Pause afficherait « erreur ».
+2. **Les routes littérales avant les routes paramétrées.**
+   `/etape/pause` avant `/etape/{etape}`, sinon la seconde avale la première.
+   FastAPI matche dans l'ordre de déclaration.
+3. **Une ligne sans remplacement n'est pas un choix.** Elle ne doit pas
+   bloquer la cascade vers `Global/polices.csv`.
+4. **Le registre est la source de vérité, pas le disque.** `analyser.py`
+   synchronise avant d'analyser ; un PDF marqué `ignore` est sauté mais garde
+   ses données.
+
+## 7. Les polices, en détail
 
 Trois sources, du plus spécifique au général :
 
@@ -185,7 +229,7 @@ vient du contenu.
 
 ---
 
-## 7. Variables d'environnement
+## 8. Variables d'environnement
 
 | Variable | Effet |
 |---|---|
@@ -215,16 +259,20 @@ faire confiance à sa liste : vérifier par un test.
 
 ---
 
-## 8. Ajouter une étape
+## 9. Ajouter une étape
 
-1. **Dans `analyser.py`** : une fonction `step_xxx(pdfs, work, ...)`, qui
-   écrit un fichier et émet `prog(fait, total, libelle)` pour la progression.
+1. **Dans `analyser.py`** : une fonction `step_xxx(pdfs, work, con, ...)`,
+   qui reçoit la connexion `con` et écrit **en base** — plus aucun fichier.
+   Elle émet `prog(fait, total, libelle)` pour la progression.
+   Si l'étape a ses propres tables, les ajouter dans `SCHEMA` (`base.py`) et
+   écrire les lectures/écritures dans `donnees.py`.
 2. **Dans `serveur.py`** : ajouter le nom à `ETAPES`, et ses conflits dans
    `CONFLITS`. Sans ça, aucune règle de blocage ne s'applique.
 3. ~~**Dans `ETAPES_TOUT`**~~ — supprimé : l'enchaînement automatique n'existe
    plus, le workflow exige une validation manuelle entre chaque étape.
 4. **Dans `index.html`** : `LIB` (libellé), `ORDRE` (ordre du workflow), la
-   fonction `vue_xxx`, et le routage dans `dessinerVue()`.
+   fonction `vue_xxx`, et le routage dans `dessinerVue()`. Elle lit l'API, pas
+   la base directement.
 5. **Dans `_etat_projet()`** de `serveur.py` : ajouter le test « fait ? » qui
    sert à la détection de l'étape suivante.
 
@@ -233,7 +281,7 @@ dans le flux du processus. C'est inoffensif en ligne de commande.
 
 ---
 
-## 9. L'interface
+## 10. L'interface
 
 Une seule page, HTML + JS vanilla, **aucun build**. Servie par `serveur.py`
 sur la même origine que l'API.
@@ -251,7 +299,7 @@ savoir où elle en est.
 
 ---
 
-## 10. Dépannage
+## 11. Dépannage
 
 | Symptôme | Cause probable |
 |---|---|
@@ -261,7 +309,17 @@ savoir où elle en est.
 | une étape renvoie 0 | tous les appels ont échoué ; regarder le log de l'étape |
 | le port 8756 est occupé | un ancien serveur tourne ; `netstat -ano | grep 8756` puis `taskkill /F /PID` |
 
-**Aucun test automatique.** La seule vraie vérification est d'exécuter et de
-regarder le résultat : `/api/docs` permet de tester chaque route, et
+**Six tests, à lancer avant de conclure.** Ils tournent en une seconde :
+
+```bash
+.venv/Scripts/python.exe test_base.py test_registre.py test_donnees.py test_export.py
+cd interface && ../.venv/Scripts/python.exe test_serveur.py test_api.py
+```
+
+Ils vérifient le schéma, le registre, la logique d'orphelin, l'export, les
+routes et leurs refus. Ils ne remplacent pas l'exécution réelle : c'est
+elle qui a attrapé le `with` qui se fermait trop tot, et le `catch` duplique.
+
+Pour le reste, la vérification est d'exécuter et de regarder : `/api/docs` permet de tester chaque route, et
 `python polices.py` / `python catalogue_polices.py` affichent l'état réel des
 polices.
