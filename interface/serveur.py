@@ -1376,6 +1376,28 @@ def api_banc_catalogue():
     }
 
 
+def _leviers_par_modele(payload: dict, modeles: list[dict], banc) -> dict:
+    """Un jeu de leviers par modele.
+
+    Tu peux vouloir space-bunny en effort "low" et ling en "high" : ce sont
+    deux choix independants. Si l'interface n'envoie qu'un seul jeu, il
+    s'applique a tous — c'est le comportement par defaut.
+    """
+    brut = payload.get("leviers") or payload
+    if not isinstance( brut, dict) or not any(
+            k in brut for k in ("effort", "max_tokens", "temperature")):
+        # pas de dict par modele : un seul jeu pour tous
+        return {m["id"]: _leviers(brut, m, banc) for m in modeles}
+
+    par_modele = {}
+    for m in modeles:
+        son_jeu = brut.get(m["id"])
+        par_modele[m["id"]] = (
+            _leviers(son_jeu, m, banc) if isinstance(son_jeu, dict)
+            else _leviers(brut, m, banc))
+    return par_modele
+
+
 def _leviers(payload: dict, modele: dict, banc) -> dict:
     """Les leviers d'un appel, avec "auto" resolu.
 
@@ -1566,7 +1588,8 @@ def api_banc_lancer(payload: dict):
                     BANC["log"] = (f"{p['etape']} — {p['fait']}/{p['total']} "
                                    f"mesures")
 
-            r = banc.lancer(choisis, leviers, scenarios=scenarios,
+            leviers_par_modele = _leviers_par_modele(payload, choisis, banc)
+            r = banc.lancer(choisis, leviers_par_modele, scenarios=scenarios,
                             timeout=timeout, repetitions=repetitions,
                             source=source, projet=projet,
                             avec_charge=avec_charge, charge_niveaux=charge_niveaux,

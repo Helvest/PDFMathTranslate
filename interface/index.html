@@ -1664,9 +1664,15 @@ async function vueBanc(v, colTri) {
 
   // --- les declarations communes, dans l'ordre ou elles sont utilisees ---
   // Ce que tu as choisi, conserve entre deux rendus : sans ca, decocher un
-  // modele re-rendait la page et remettait scenarios et effort a zero.
+  // modele re-rendait la page et remettait tout a zero.
+  //
+  // Les REGLAGES sont stockes PAR MODELE. Tu peux vouloir space-bunny en
+  // effort "low" et ling en "high" : ce sont deux choix independants, pas un
+  // choix global. Les scenarios, eux, restent globaux — ils dependent des
+  // modeles coches, pas du modele affiche.
   S.bancChoix = S.bancChoix || {};
   const CHOIX = S.bancChoix;
+  CHOIX.reglages = CHOIX.reglages || {};   // { modele: {effort, tokens, ...} }
 
   const cat = S.bancCatalogue || { modeles: [], leviers: {} };
   S.banc = d;
@@ -1679,6 +1685,11 @@ async function vueBanc(v, colTri) {
     CHOIX.vue = S.options?.model || "stealth/space-bunny-alpha";
   }
   const vu = cat.modeles.find((m) => m.id === CHOIX.vue) || null;
+  // les reglages du modele affiche : lus par defaut, ecrits quand on change.
+  // defaut() separe la valeur stockee de la valeur du catalogue.
+  const RE = (CHOIX.reglages[CHOIX.vue] = CHOIX.reglages[CHOIX.vue] || {});
+  const defaut = (cle, valeur) => (RE[cle] === undefined ? valeur : RE[cle]);
+  const defautNum = (cle, valeur) => Number(defaut(cle, valeur));
   // Trois etats, pas deux. Un modele peut savoir raisonner SANS lister de
   // niveaux (ling-3.1-flash) : conclure "il ne raisonne pas" — ce que
   // faisait la condition ci-dessous — masquait a tort le seul reglage que
@@ -1713,19 +1724,28 @@ async function vueBanc(v, colTri) {
       <button class="btn" id="b-rafraichir">Rafraichir</button>
       <span class="faible">${res.modeles ? res.modeles.length : 0} resultat(s)</span>
     </div>
-    ${enCours ? `
-      <div style="margin:7px 0 3px">
-        <div class="barre-prog" title="Scenarios deja mesures">
-          <i style="width:${etat.total ? Math.min(100, ((etat.fait || 0) / etat.total) * 100) : 0}%"></i>
-        </div>
-        <p class="faible" style="margin:0 0 5px;font-size:10.5px">
-          ${etat.fait || 0}/${etat.total || 0} mesures</p>
+    ${(() => {
+      // la barre reste visible apres le run : sinon tu ne vois jamais ou tu en
+      // es, et tu ne peux pas juger le temps que ca a pris
+      const pct = etat.total ? Math.min(100, ((etat.fait || 0) / etat.total) * 100) : 0;
+      return `
+    <div class="progression">
+      <div class="barre-prog" title="Mesures faites sur le total">
+        <i style="width:${pct}%"></i>
       </div>
-      <div style="margin:3px 0">
-        <p class="faible" style="margin:0 0 3px;font-size:11px">
-          <b>Test en cours</b> — ${echapper(etat.etape || "preparation")}
-          &nbsp;·&nbsp; etape ${etat.fait || 0} sur ${etat.total || 0}</p>
-      </div>` : ""}
+      <p class="faible" style="margin:0 0 6px;font-size:10.5px">
+        ${etat.total
+          ? `${etat.fait || 0} / ${etat.total} mesures — ${
+              Math.round(pct)}%`
+          : "Aucune mesure pour l'instant"}
+        ${enCours && etat.etape
+          ? ` — <b>en cours</b> : ${echapper(etat.etape)}` : ""}
+        ${!enCours && etat.etat === "termine"
+          ? ` — terminé${etat.debut ? " le " + echapper(etat.debut) : ""}`
+          : ""}
+      </p>
+    </div>`;
+    })()}
     ${etat.log ? `<div class="log" id="log-banc" style="max-height:110px">${
       echapper(etat.log)}</div>` : ""}
     ${etat.erreur ? `<p class="vide">${echapper(etat.erreur)}</p>` : ""}
@@ -1770,6 +1790,42 @@ async function vueBanc(v, colTri) {
   </div>`;
 
   // ---------- la fiche du modele et ses leviers ----------
+  // Les explications. Un reglage qu'on ne comprend pas est un reglage qu'on
+  // laisse a "auto" sans savoir pourquoi.
+  const aide = {
+    effort: "A quel niveau le modele raisonne avant de repondre. "
+      + "low = rapide et direct, high = plusitterse de temps et "
+      + "meilleure sur les cas complexes. Sur space-bunny, effort max "
+      + "prend 46s et coupe la reponse ; low met 16s et repond complet.",
+    effortFixe: "Ce modele sait raisonner mais ne dit pas quels niveaux il "
+      + "accepte. On ne peut donc pas choisir — il raisonne a son niveau a lui.",
+    obligatoire: "Ce modele ne peut pas raisonner autrement : le raisonnement "
+      + "est impose par le service. Activer ou desactiver n'aurait aucun effet.",
+    raisonnement: "Active ou coupe la reflexion. Desactiver rend la reponse "
+      + "plus directe et plus rapide, au detriment de la reflexion sur les cas "
+      + "difficiles. Sans effet sur un modele qui l'impose.",
+    include: "Montre ou masque le raisonnement dans la reponse. Utile pour "
+      + "voir POURQUOI il a choisi un terme ; inutile en production, ca "
+      + "allonge la reponse.",
+    tokens: "Nombre maximum de tokens que le modele peut produire. Un budget "
+      + "trop petit coupe la reponse en plein milieu — c'est ce qui donne 0 "
+      + "terme sur un glossaire.",
+    temperature: "0 = toujours la meme reponse. Plus haut = plus varie. "
+      + "Garde 0 pour un glossaire : on veut le meme resultat a chaque passage.",
+    repetitions: "Combien de fois on repete chaque scenario. 1 suffit pour "
+      + "voir si ca marche ; 3 ou plus permet de voir la stabilite — "
+      + "l'ecart-type distingue un modele sur d'un modele chanceux.",
+    top_p: "Diversite de l'echantillonnage. 0.9 = classique. Baisser rend "
+      + "la reponse plus previsible,Relevant au risque de repetition.",
+    seed: "Graine du hasard. Le meme seed donne exactement la meme reponse : "
+      + "deux bancs deviennent comparables.",
+    stop: "Texte qui arrete la generation. Deux retours a la ligne, ou "
+      + "trois signes diese, evitent qu'un modele continue apres ta reponse.",
+    repetition_penalty: "Penalise la repetition d'un mot. Utile quand un "
+      + "modele boucle sur du JSON. Trop haut, il casse les traductions.",
+  };
+
+
 
   html += `<div class="bloc">
     <h2 class="titre">${vu ? echapper(vu.id) : "Aucun modele affiche"}
@@ -1799,27 +1855,34 @@ async function vueBanc(v, colTri) {
       <div class="rangee">
         ${raisonne ? `
           ${aNiveaux ? `
-          <label class="rangee"><span class="faible">Effort</span>
+          <label class="rangee" title="${aide.effort}">
+            <span class="faible">Effort <span class="pastille">?</span></span>
             <select id="b-effort">
               <option value="auto">auto — celui de la production (${
                 cat.leviers.effort || "low"})</option>
               ${modelesNiveaux.map((e) =>
-                `<option value="${e}" ${CHOIX.effort === e ? "selected" : ""}>${e}</option>`
+                `<option value="${e}" ${defaut("effort", "auto") === e ? "selected" : ""}>${e}</option>`
               ).join("")}
             </select></label>` : `
-          <label class="rangee"><span class="faible">Effort</span>
-            <input type="text" value="niveau fixe" disabled style="width:104px"
-              title="Ce modele raisonne mais ne dit pas quels niveaux il accepte"></label>`}
-          <label class="rangee"><span class="faible">Raisonnement</span>
+          <label class="rangee" title="${aide.effortFixe}">
+            <span class="faible">Effort <span class="pastille">?</span></span>
+            <input type="text" value="niveau fixe" disabled style="width:104px"></label>`}
+          ${vu.raisonnement_obligatoire ? `
+          <label class="rangee" title="${aide.obligatoire}">
+            <span class="faible">Raisonnement</span>
+            <input type="text" value="obligatoire" disabled style="width:110px"></label>` : `
+          <label class="rangee" title="${aide.raisonnement}">
+            <span class="faible">Raisonnement <span class="pastille">?</span></span>
             <select id="b-raison">
-              <option value="1" ${CHOIX.raisonnement !== false ? "selected" : ""}>actif</option>
-              <option value="0" ${CHOIX.raisonnement === false ? "selected" : ""}>desactive</option>
+              <option value="1" ${defaut("raisonnement", true) ? "selected" : ""}>actif</option>
+              <option value="0" ${!defaut("raisonnement", true) ? "selected" : ""}>desactive</option>
             </select></label>
-          <label class="rangee"><span class="faible">include_reasoning</span>
+          <label class="rangee" title="${aide.include}">
+            <span class="faible">include_reasoning <span class="pastille">?</span></span>
             <select id="b-reasoning">
-              <option value="0" ${CHOIX.include_reasoning ? "" : "selected"}>masque</option>
-              <option value="1" ${CHOIX.include_reasoning ? "selected" : ""}>visible</option>
-            </select></label>` : `
+              <option value="0" ${!defaut("include", false) ? "selected" : ""}>masque</option>
+              <option value="1" ${defaut("include", false) ? "selected" : ""}>visible</option>
+            </select></label>`}` : `
           <p class="faible" style="margin:0">
             Ce modele ne raisonne pas : ni effort, ni raisonnement, ni
             include_reasoning. Seul <code>temperature</code> s'applique.</p>`}
@@ -2031,19 +2094,37 @@ async function vueBanc(v, colTri) {
 
   // les leviers lus une seule fois pour les deux boutons : si chaque bouton
   // les relisait, ils divergeraient — c'est exactement le bug "auto" d'hier
-  const _leviersUI = () => ({
-    effort: v.querySelector("#b-effort")?.value || "auto",
-    max_tokens: Number(v.querySelector("#b-maxtok")?.value) || 16000,
-    temperature: Number(v.querySelector("#b-temp")?.value) || 0,
-    top_p: v.querySelector("#b-topp")?.value || null,
-    seed: v.querySelector("#b-seed")?.value || null,
-    repetition_penalty: v.querySelector("#b-rep")?.value || null,
-    stop: v.querySelector("#b-stopseq")?.value || null,
-    repetitions: Number(v.querySelector("#b-repet")?.value) || 3,
-    include_reasoning: !!v.querySelector("#b-reasoning")?.checked,
-    raisonnement: v.querySelector("#b-raison")?.value !== "0",
-    timeout: Number(v.querySelector("#b-timeout")?.value) || 180,
-  });
+  // Les reglages sont lus du DOM pour LE MODELE AFFICHE, et memorises pour
+  // lui. Le banc porte sur plusieurs modeles : on envoie les reglages de
+  // chacun, sinon on appliquerait le choix d'un modele a tous les autres.
+  const _lireReglages = (id) => {
+    const R = (CHOIX.reglages[id] = CHOIX.reglages[id] || {});
+    const lire = (sel, cle, def) => {
+      const el = v.querySelector(sel);
+      if (el && el.value !== "" && el.value !== undefined) R[cle] = el.value;
+      return R[cle] === undefined ? def : R[cle];
+    };
+    return {
+      effort: lire("#b-effort", "effort", "auto"),
+      max_tokens: Number(lire("#b-maxtok", "tokens", 16000)),
+      temperature: Number(lire("#b-temp", "temperature", 0)),
+      repetitions: Number(lire("#b-repet", "repetitions", 3)),
+      timeout: Number(lire("#b-timeout", "timeout", 180)),
+      top_p: lire("#b-topp", "top_p", null),
+      seed: lire("#b-seed", "seed", null),
+      repetition_penalty: lire("#b-rep", "rep", null),
+      stop: lire("#b-stopseq", "stop", null),
+      include_reasoning: lire("#b-reasoning", "include", "0") === "1",
+      raisonnement: lire("#b-raison", "raisonnement", "1") !== "0",
+    };
+  };
+  const _leviersUI = () => {
+    const ids = CHOIX.modeles || [];
+    if (!ids.length) return _lireReglages(CHOIX.vue);
+    const parModele = {};
+    for (const id of ids) parModele[id] = _lireReglages(id);
+    return parModele;
+  };
 
   // ---------- les scenarios choisis ----------
   const _scenariosChoisis = () =>
@@ -2076,7 +2157,7 @@ async function vueBanc(v, colTri) {
         modeles,   // la charge se mesure sur TOUS les modeles coches
         niveaux,
         projet: v.querySelector("#b-source")?.value || "",
-        ..._leviersUI(),
+        leviers: _leviersUI(),
       }) });
       notif(`Charge : ${modeles.length} modèle(s)`);
       vueBanc(v);
@@ -2091,7 +2172,7 @@ async function vueBanc(v, colTri) {
     try {
       await api("/banc/lancer", { method: "POST", body: JSON.stringify({
         modeles,
-      ..._leviersUI(),
+      leviers: _leviersUI(),
       }) });
       notif("Banc lance");
       vueBanc(v);

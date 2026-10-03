@@ -684,13 +684,53 @@ def test_raisonne() -> None:
                  f"{m['id']} : attendu un modele qui sait raisonner")
 
 
+def test_leviers_par_modele() -> None:
+    """Chaque modele a ses propres reglages.
+
+    Tu peux vouloir space-bunny en effort "low" et ling en "high" : deux choix
+    independants. Si un seul jeu s'applique a tous, tu comparais des modeles
+    avec des reglages differents — le resultat ne voulait rien dire.
+    """
+    a = {"id": "x/low", "efforts": ["low"], "raisonnement_obligatoire": True}
+    b = {"id": "y/high", "efforts": ["high"], "raisonnement_obligatoire": True}
+
+    # un dict par modele
+    par = {"x/low": {"effort": "low", "max_tokens": 16000},
+           "y/high": {"effort": "high", "max_tokens": 4000}}
+    _verifie(banc._leviers_du_modele(par, "x/low", a)["effort"] == "low",
+             "x/low devrait avoir effort low")
+    _verifie(banc._leviers_du_modele(par, "y/high", b)["effort"] == "high",
+             "y/high devrait avoir effort high")
+    _verifie(banc._leviers_du_modele(par, "y/high", b)["max_tokens"] == 4000,
+             "chaque modele garde son propre budget de tokens")
+
+    # un dict simple : applique a tous
+    simple = {"effort": "low", "max_tokens": 16000}
+    _verifie(banc._leviers_du_modele(simple, "x/low", a)["effort"] == "low",
+             "un jeu simple doit s'appliquer a tous")
+
+    # un modele absent du dict par modele : on ne doit pas planter
+    _verifie(banc._leviers_du_modele(par, "z/inconnu", a) is not None,
+             "un modele absent du dict doit avoir un jeu de secours")
+
+    # et deux appels reels doivent partir differemment
+    ca = banc._construire(a, banc._leviers_du_modele(par, "x/low", a), "p")
+    cb = banc._construire(b, banc._leviers_du_modele(par, "y/high", b), "p")
+    _verifie(ca["reasoning"]["effort"] != cb["reasoning"]["effort"],
+             f"les deux modeles ont recu le meme effort : "
+             f"{ca['reasoning']['effort']} / {cb['reasoning']['effort']}")
+    _verifie(ca["max_tokens"] != cb["max_tokens"],
+             "les budgets de tokens se sont confondus")
+
+
 def main() -> int:
     for fn in (test_catalogue, test_catalogue_complet, test_leviers,
                test_leviers_supports, test_qualite,
                test_scenarios, test_resume, test_charge,
                test_reprise_reponse_vide, test_leviers_api,
                test_score, test_repetitions,
-               test_include_reasoning, test_raisonne):
+               test_include_reasoning, test_raisonne,
+               test_leviers_par_modele):
         fn()
 
     if "--reseau" in sys.argv:

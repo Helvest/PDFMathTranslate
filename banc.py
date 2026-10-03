@@ -656,6 +656,16 @@ def _resume(reponses: list[dict]) -> dict:
     }
 
 
+def _leviers_du_modele(leviers, modele_id: str, modele: dict) -> dict:
+    """Accepte soit un dict simple, soit {modele_id: dict}."""
+    if isinstance(leviers, dict) and modele_id in leviers:
+        return leviers[modele_id]
+    if isinstance(leviers, dict) and not any(
+            k in leviers for k in ("effort", "max_tokens", "temperature")):
+        return leviers            # le serveur a deja resolu
+    return leviers
+
+
 def lancer(modeles: list[dict], leviers: dict, scenarios=SCENARIOS,
            timeout: int = 180, repetitions: int = 1,
            source: Path = SOURCE, projet: str | None = None,
@@ -674,8 +684,8 @@ def lancer(modeles: list[dict], leviers: dict, scenarios=SCENARIOS,
     # 6 workers : au-dela, on se dispute le service (mesure par le Banc charge)
     with ThreadPoolExecutor(max_workers=6) as ex:
         futs = {
-            ex.submit(mesurer, m, s, leviers, texte, doc, page, timeout,
-                      repetitions): (m["id"], s)
+            ex.submit(mesurer, m, s, _leviers_du_modele(leviers, m["id"], m),
+                      texte, doc, page, timeout, repetitions): (m["id"], s)
             for m, s in tasks
         }
         for f in as_completed(futs):
@@ -688,17 +698,20 @@ def lancer(modeles: list[dict], leviers: dict, scenarios=SCENARIOS,
     noms_all = list(scenarios) + (["charge"] if avec_charge else [])
     par_modele = []
     for m in modeles:
+        lv = _leviers_du_modele(leviers, m["id"], m)
         reps = [brut.get((m["id"], s), {}) for s in scenarios]
 
         # la charge, si demandee : un pseudo-scenario avec les memes cles, pour
         # qu'elle se trie et s'affiche comme les autres
         if avec_charge:
-            r = banc_charge(m["id"], charge_niveaux or [1, 2, 4, 8], leviers,
+            r = banc_charge(m["id"], charge_niveaux or [1, 2, 4, 8], lv,
                             timeout, source, projet, progres)
             reps.append(r)
         scores = [r["score"] for r in reps if r.get("score") is not None]
         ligne = {"modele": m["id"], "nom": m.get("nom", ""),
-                 "effort": leviers.get("effort") or "aucun",
+                 # l'effort de CE modele, pas celui d'un autre : avec des
+                 # reglages par modele, leviers n'a plus de "effort" unique
+                 "effort": lv.get("effort") or "auto",
                  # la note globale : moyenne des scenarios. C'est ce qui
                  # permet de classer d'un coup d'oeil.
                  "score": round(statistics.mean(scores)) if scores else 0,
