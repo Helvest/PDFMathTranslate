@@ -1591,6 +1591,12 @@ async function vueBanc(v) {
   try { d = await api("/banc/resultats"); }
   catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
 
+  // la charge est un banc a part : on la lit aussi, mais un echec ici ne doit
+  // pas masquer les resultats du banc normal
+  let charge = { niveaux: [], tenu: 0 };
+  try { charge = (await api("/banc/charge"))?.charge || charge; }
+  catch (e) { /* pas de mesure de charge, tant pis */ }
+
   S.banc = d;
   const res = d.resultats || {};
   const etat = d.etat || {};
@@ -1723,10 +1729,74 @@ async function vueBanc(v) {
         </tr>`;
       }
       html += `</table></div></div>`;
-    }
-  }
+          }
+        }
 
-  v.innerHTML = html;
+        // ---------- la charge ----------
+        // Combien d'appels simultanes le modele encaisse-t-il ? C'est la question
+        // qu'on se pose avant de lancer 40 blocs de glossaire en parallele.
+        html += `<div class="bloc">
+          <h2 class="titre">Charge — combien d'agents en meme temps</h2>
+          <p class="faible" style="margin:0 0 8px">
+            Fait tourner des blocs de glossaire en nombre croissant, et mesure ce que
+            ca rapporte vraiment. Le gain compare au sequentiel : s'il reste a 1x, on
+            se dispute le service au lieu de gagner du temps. Le test s'arrete au
+            premier palier qui perd un appel.</p>
+          <div class="rangee" style="margin-bottom:8px">
+            <label class="rangee"><span class="faible">Paliers</span>
+              <input type="text" id="c-niveaux" value="1, 2, 3, 4, 6, 8, 12, 16, 24"
+                     style="width:150px"></label>
+            <button class="btn acc" id="c-lancer" ${enCours ? "disabled" : ""}>
+              ${enCours ? "Mesure en cours…" : "Mesurer la charge"}</button>
+          </div>
+          ${charge.niveaux && charge.niveaux.length ? `
+            <div class="faible" style="margin:0 0 6px">
+              ${echapper(charge.modele || "")} — plafond mesure :
+              <b style="color:var(--ok)">${charge.tenu || 0} agents</b> sans perte
+              ${charge.maj ? ` (${echapper(charge.maj)})` : ""}</div>
+            <div class="scroll-tab"><table>
+              <tr><th>Agents</th><th>Blocs</th><th>Reussis</th><th>Temps du lot</th>
+                  <th>Gain</th><th>Latence min/moy/max</th><th>Tronques</th><th>Termes</th></tr>
+              ${charge.niveaux.map((n) => `<tr>
+                <td>${n.n_agents}</td>
+                <td class="faible">${n.blocs}</td>
+                <td class="${n.nb_ok === n.blocs ? "" : "alerte"}">${echapper(n.reussis)}</td>
+                <td>${n.total_s}s</td>
+                <td${n.gain >= 2 ? ' style="color:var(--ok)"' : ""}>${n.gain ?? "—"}x</td>
+                <td class="faible">${n.lat_min ?? "—"} / ${n.lat_moy ?? "—"} / ${n.lat_max ?? "—"}s</td>
+                <td class="${n.tronques ? "alerte" : "faible"}">${n.tronques}</td>
+                <td class="faible">${n.termes}</td>
+              </tr>`).join("")}
+            </table></div>
+            ${charge.niveaux.some((n) => n.erreurs && n.erreurs.length) ? `
+              <div class="log" style="max-height:90px;margin-top:7px">${echapper(
+                [...new Set(charge.niveaux.flatMap((n) => n.erreurs || []))].join("\n"))}</div>` : ""}
+          ` : `<p class="vide">Pas encore de mesure de charge.</p>`}
+        </div>`;
+
+        v.innerHTML = html;
+
+        // ---------- le bouton de charge ----------
+        const cl = v.querySelector("#c-lancer");
+        if (cl) cl.addEventListener("click", async () => {
+          const modeles = [...v.querySelectorAll("[data-mod]:checked")].map((c) => c.dataset.mod);
+          if (!modeles.length) return notif("Coche au moins un modele", true);
+          const niveaux = (v.querySelector("#c-niveaux")?.value || "")
+            .split(",").map((x) => Number(x.trim())).filter((x) => x > 0);
+          if (!niveaux.length) return notif("Aucun palier valide", true);
+          try {
+            await api("/banc/charge/lancer", { method: "POST", body: JSON.stringify({
+              modeles: [modeles[0]],   // la charge se mesure sur un modele a la fois
+              niveaux,
+              effort: v.querySelector("#b-effort")?.value || "auto",
+              max_tokens: Number(v.querySelector("#b-maxtok")?.value) || 16000,
+              temperature: Number(v.querySelector("#b-temp")?.value) || 0,
+              timeout: Number(v.querySelector("#b-timeout")?.value) || 180,
+            }) });
+            notif(`Charge : ${modeles[0]}`);
+            vueBanc(v);
+          } catch (e) { notif(e.message, true); }
+        });
 
   // ---------- branchements ----------
   const bl = v.querySelector("#b-lancer");

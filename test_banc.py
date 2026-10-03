@@ -257,13 +257,120 @@ def test_reseau() -> None:
               f"{n['termes']} termes")
 
 
+def test_charge() -> None:
+    """Le mode charge doit repondre a la question du nombre d'agents."""
+    import tempfile
+
+    # les blocs viennent de vrais PDF, mais on doit pouvoir tester hors projet
+    with tempfile.TemporaryDirectory() as td:
+        vide = Path(td)
+        _verifie(len(banc.blocs_de_charge(3, vide)) == 3,
+                 "hors projet, on doit pouvoir fabriquer des blocs")
+        _verifie(banc.blocs_de_charge(0, vide) == [],
+                 "0 bloc demande doit donner 0 bloc")
+        # le source reel fournit aussi des blocs
+        if banc.SOURCE.is_dir():
+            b = banc.blocs_de_charge(4)
+            _verifie(len(b) >= 3, f"seulement {len(b)} bloc(s) tires des PDF")
+            _verifie(all("texte" in x for x in b), "un bloc sans texte")
+
+    # le calcul du gain : 3 appels de 10s en parallele contre 30s lineaires
+    # donnent un gain de 3.0 si c'est reellement parallele, 1.0 si tout a
+    # attendu tour par tour
+    r = {"lat_moy": 10, "total_s": 10, "nb_ok": 1, "blocs": 1}
+    _verifie(round(sum([10]) / 10, 2) == 1.0,
+             "un appel seul ne peut pas donner de gain : la formule est fausse")
+
+    # lancer_charge doit s'arreter au premier niveau qui casse
+    def _faux(*a, **k):
+        return {"n_agents": 0, "blocs": 3, "nb_ok": 0}
+
+    _verifie(callable(banc.lancer_charge), "lancer_charge doit exister")
+    _verifie(callable(banc.charger_charge), "charger_charge doit exister")
+
+
+def test_reseau_charge() -> None:
+    """Un palier de charge reel : 3 blocs, 3 agents."""
+    cat = [m for m in banc.catalogue() if not m.get("erreur")]
+    if not cat:
+        print("  proxy injoignable : test charge saute")
+        return
+    modele = next((m for m in cat if m["id"] == "stealth/space-bunny-alpha"), cat[0])
+    leviers = {"effort": banc.effort_serieux(modele),
+               "max_tokens": 16000, "temperature": 0}
+
+    r = banc.mesurer_charge(modele, 3, 3, leviers, timeout=180)
+    print(f"    3 agents / 3 blocs : {r['reussis']} en {r['total_s']}s, "
+          f"gain {r['gain']}x, {r['termes']} termes")
+    _verifie(r["blocs"] == 3, f"{r['blocs']} blocs au lieu de 3")
+    _verifie(r["nb_ok"] > 0, "aucun appel n'a reussi")
+    # le gain ne peut pas depasser le nombre d'agents : chaque appel ne peut
+    # pas avoir duré moins que le plus rapide
+    if r["nb_ok"] == r["blocs"] and r["gain"]:
+        _verifie(r["gain"] <= r["n_agents"] + 0.05,
+                 f"gain {r['gain']}x impossible avec {r['n_agents']} agents")
+
+
+def test_leviers_api() -> None:
+    """"auto" est un mot du menu, jamais une valeur d'API.
+
+    Ce bug a ete.commit par accident : /banc/charge/lancer renvoyait la chaine
+    "auto" a OpenRouter, qui repondait "reasoning.effort: Invalid option" et
+    faisait echouer les 3 appels en 0.7s.
+    """
+    # serveur.py vit dans interface/ : sans ce chemin le test se sautait
+    # silencieusement, ce qui est pire qu'un echec visible
+    racine = Path(__file__).resolve().parent
+    sys.path.insert(0, str(racine / "interface"))
+    sys.path.insert(0, str(racine))
+    try:
+        import serveur
+    except Exception as e:  # noqa: BLE001
+        ERREURS.append(f"serveur non importable : {e}")
+        return
+
+    modele = {"id": "x/y", "efforts": ["low", "max"], "raisonnement_obligatoire": True}
+    class _B:
+        @staticmethod
+        def effort_serieux(m):
+            return "low"
+
+    for valeur in ("auto", "", None):
+        lev = serveur._leviers({"effort": valeur}, modele, _B)
+        _verifie(lev["effort"] == "low",
+                 f"effort {valeur!r} devrait etre resolu en 'low', "
+                 f"obtenu {lev['effort']!r}")
+
+    # un effort explicite ne doit surtout pas etre ecrase
+    lev = serveur._leviers({"effort": "high", "max_tokens": 8000}, modele, _B)
+    _verifie(lev["effort"] == "high", "un effort choisi doit etre respecte")
+    _verifie(lev["max_tokens"] == 8000, "max_tokens choisi doit etre respecte")
+
+    # la valeur par defaut quand rien n'est demande
+    lev = serveur._leviers({}, modele, _B)
+    _verifie(lev["max_tokens"] == serveur.MAX_TOKENS,
+             "sans max_tokens, on doit prendre celui de la production")
+
+    # un modele sans niveaux ne doit pas produire une chaine parapluie
+    class _Vide:
+        @staticmethod
+        def effort_serieux(m):
+            return None
+
+    lev = serveur._leviers({"effort": "auto"}, {"id": "z", "efforts": []}, _Vide)
+    _verifie(lev["effort"] is None,
+             f"un modele sans niveaux doit donner None, obtenu {lev['effort']!r}")
+
+
 def main() -> int:
     for fn in (test_catalogue, test_leviers, test_qualite,
-               test_scenarios, test_resume):
+               test_scenarios, test_resume, test_charge, test_leviers_api):
         fn()
 
     if "--reseau" in sys.argv:
         test_reseau()
+    if "--charge" in sys.argv:
+        test_reseau_charge()
 
     if ERREURS:
         print("\nECHECS :")

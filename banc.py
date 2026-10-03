@@ -42,6 +42,7 @@ REPO = Path(__file__).resolve().parent
 GLOBAL = REPO.parent / "Global"
 BENCH = GLOBAL / "banc"
 RESULTATS = BENCH / "resultats.json"
+CHARGE = BENCH / "charge.json"
 
 PROXY = "http://127.0.0.1:8645/v1"
 CLE = "hermes"
@@ -403,6 +404,130 @@ def charger() -> dict:
         except (json.JSONDecodeError, OSError):
             pass
     return {"modeles": [], "maj": None}
+
+
+# ---------------------------------------------------------------- charge
+#
+# La question : combien d'appels simultanes le modele encaisse-t-il ?
+# C'est celle qu'on se pose avant de lancer 40 blocs de glossaire en
+# parallele, et le Banc doit y repondre tout seul.
+
+def blocs_de_charge(n: int, source: Path = SOURCE) -> list[dict]:
+    """n blocs de travail, pris dans les vrais PDF du projet.
+
+    Hors projet (pas de PDF, ou dossier vide), on fabrique des blocs a partir
+    d'un texte de repli. Le repli doit en produire autant que demande, sinon le
+    mode charge ment sur le nombre d'agents qu'il teste.
+    """
+    if n <= 0:
+        return []
+
+    if source.is_dir():
+        taches: list[dict] = []
+        for pdf in sorted(source.glob("*.pdf")):
+            doc = pymupdf.open(str(pdf))
+            for i in range(min(doc.page_count, 4)):
+                taches += _agents.planifier(
+                    [(pdf.name, i + 1, str(doc[i].get_text()))])
+            doc.close()
+            if len(taches) >= n:
+                break
+        if len(taches) >= n:
+            return taches[:n]
+
+    # repli : du texte repeté, decoupe par le meme planificateur que la prod
+    base = ("The Lowland Wastes hold many secrets. Cloud Empress watches from "
+            "the ridge, counting the smoke. ") * 60
+    return _agents.planifier([("repli.pdf", 1, base)])[:n]
+
+
+def mesurer_charge(modele: dict, n_agents: int, nb_blocs: int,
+                   leviers: dict, timeout: int = 180,
+                   source: Path = SOURCE) -> dict:
+    """nb_blocs blocs, n_agents en meme temps.
+
+    On mesure le temps total du lot, les reussites, et le debit : c'est ce qui
+    dit si paralleliser sert vraiment ou si on perd du temps en se disputant
+    le service.
+    """
+    blocs = blocs_de_charge(nb_blocs, source)
+    prompts = [_agents.prompt_extraction(b["texte"]) for b in blocs]
+
+    t0 = time.time()
+    resultats: list[dict] = []
+    # as_completed : un banc long affiche au fur et a mesure, sinon rien ne
+    # bouge pendant des minutes
+    with ThreadPoolExecutor(max_workers=n_agents) as ex:
+        futs = [ex.submit(appeler, modele, p, leviers, timeout) for p in prompts]
+        for f in as_completed(futs):
+            r = f.result()
+            r["exploitable"] = (not r.get("tronce")) and bool(
+                _agents.lire_reponse(r.get("sortie", "")))
+            resultats.append(r)
+    total = time.time() - t0
+
+    ok = [r for r in resultats if r.get("ok")]
+    lats = sorted(r["latence"] for r in ok)
+    termes = sum(len(_agents.lire_reponse(r.get("sortie", ""))) for r in ok)
+
+    # le gain compare au sequentiel : si paralleliser n'ameliore rien, ca veut
+    # dire qu'on se dispute le service, pas qu'on gagne du temps
+    lineaire = sum(lats)
+    return {
+        "n_agents": n_agents,
+        "blocs": len(blocs),
+        "reussis": f"{len(ok)}/{len(resultats)}",
+        "nb_ok": len(ok),
+        "total_s": round(total, 1),
+        "lat_moy": round(statistics.mean(lats), 1) if lats else None,
+        "lat_min": round(min(lats), 1) if lats else None,
+        "lat_max": round(max(lats), 1) if lats else None,
+        # 1.0 = aucun gain, 3.0 = trois fois plus rapide que du sequentiel
+        "gain": round(lineaire / total, 2) if total else None,
+        "termes": termes,
+        "tronques": sum(1 for r in ok if r.get("tronce")),
+        "erreurs": sorted({e[:70] for r in resultats
+                           for e in [r.get("erreur")] if e})[:4],
+    }
+
+
+def lancer_charge(modele: dict, niveaux: list[int], leviers: dict,
+                  timeout: int = 180, source: Path = SOURCE,
+                  progres=None) -> dict:
+    """Monte la charge, du plus petit au plus grand.
+
+    On s'arrete au premier niveau qui casse : la reponse utile d'un modele
+    lent, c'est savoir ou est la limite, pas la repousser.
+    """
+    lignes = []
+    for n in niveaux:
+        # autant de blocs que d'agents : sinon on mesure la queue, pas la pointe
+        r = mesurer_charge(modele, n, max(n, 3), leviers, timeout, source)
+        lignes.append(r)
+        if progres:
+            progres(r)
+        # un niveau qui perd un appel, les suivants seront moins bons
+        if r["nb_ok"] < r["blocs"]:
+            break
+
+    return {
+        "maj": datetime.now().isoformat(timespec="seconds"),
+        "modele": modele["id"],
+        "leviers": leviers,
+        "niveaux": lignes,
+        # le plus grand nombre d'agents qui a tenu sans perdre d'appel
+        "tenu": max((r["n_agents"] for r in lignes if r["nb_ok"] == r["blocs"]),
+                    default=0),
+    }
+
+
+def charger_charge() -> dict:
+    if CHARGE.is_file():
+        try:
+            return json.loads(CHARGE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"niveaux": [], "maj": None}
 
 
 def _auto_test() -> int:

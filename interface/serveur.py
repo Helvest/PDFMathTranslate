@@ -1355,6 +1355,86 @@ def api_banc_catalogue():
     }
 
 
+def _leviers(payload: dict, modele: dict, banc) -> dict:
+    """Les leviers d'un appel, avec "auto" resolu.
+
+    "auto" est un mot du menu de l'interface, pas une valeur d'API : envoye tel
+    quel, le routeur refuse la requete ("reasoning.effort: Invalid option").
+    On le resout en un seul endroit, sinon chaque route a son propre bug.
+    """
+    effort = payload.get("effort")
+    if effort in (None, "", "auto"):
+        effort = banc.effort_serieux(modele)
+    return {
+        "effort": effort,
+        "max_tokens": int(payload.get("max_tokens") or MAX_TOKENS),
+        "temperature": payload.get("temperature", 0),
+    }
+
+
+@app.get("/api/banc/charge")
+def api_banc_charge():
+    """La mesure de charge : combien d'agents le modele encaisse-t-il ?"""
+    import banc
+
+    return {"charge": banc.charger_charge(), "etat": dict(BANC)}
+
+
+@app.post("/api/banc/charge/lancer")
+def api_banc_charge_lancer(payload: dict):
+    """Monte la charge sur un modele. S'arrete au premier palier qui casse."""
+    if BANC["etat"] == "en_cours":
+        raise HTTPException(409, "un banc tourne deja")
+
+    import banc
+
+    ids = payload.get("modeles") or []
+    catalogue = {m["id"]: m for m in banc.catalogue() if not m.get("erreur")}
+    choisis = [catalogue[i] for i in ids if i in catalogue]
+    if not choisis:
+        raise HTTPException(400, "aucun modele connu dans la selection")
+
+    niveaux = payload.get("niveaux") or [1, 2, 3, 4, 6, 8, 12, 16, 24]
+    niveaux = sorted({int(n) for n in niveaux if 0 < int(n) <= 64})
+    if not niveaux:
+        raise HTTPException(400, "aucun niveau d'agents valide")
+
+    modele = choisis[0]
+    leviers = _leviers(payload, modele, banc)
+    timeout = int(payload.get("timeout") or 180)
+
+    BANC.update(etat="en_cours", log="", erreur="",
+                debut=datetime.now().isoformat(timespec="seconds"))
+
+    def _travail():
+        lignes_log: list[str] = []
+        try:
+            def _prog(r):
+                # on ecrit la ligne des qu'elle est connue : un banc de charge
+                # dure plusieurs minutes, l'utilisateur doit voir ca avancer
+                ligne = (f"{r['n_agents']} agents / {r['blocs']} blocs : "
+                         f"{r['reussis']} en {r['total_s']}s, "
+                         f"gain {r['gain']}x, lat moy {r['lat_moy']}s")
+                lignes_log.append(ligne)
+                BANC["log"] = "\n".join(lignes_log)
+                for e in r.get("erreurs", []):
+                    BANC["log"] += f"\n    ! {e}"
+
+            r = banc.lancer_charge(modele, niveaux, leviers, timeout=timeout,
+                                   progres=_prog)
+            banc.BENCH.mkdir(parents=True, exist_ok=True)
+            banc.CHARGE.write_text(
+                json.dumps(r, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            BANC["log"] += f"\n\nplafond : {r['tenu']} agents sans perte"
+            BANC["etat"] = "termine"
+        except Exception as e:  # noqa: BLE001
+            BANC["etat"] = "erreur"
+            BANC["erreur"] = f"{type(e).__name__}: {e}"
+
+    threading.Thread(target=_travail, daemon=True).start()
+    return {"ok": True, "modele": modele["id"], "niveaux": niveaux}
+
+
 @app.get("/api/banc/resultats")
 def api_banc_resultats():
     """Le dernier banc, et l'etat d'un banc en cours."""
@@ -1377,11 +1457,7 @@ def api_banc_lancer(payload: dict):
     if not choisis:
         raise HTTPException(400, "aucun modele connu dans la selection")
 
-    leviers = {
-        "effort": payload.get("effort"),
-        "max_tokens": int(payload.get("max_tokens") or MAX_TOKENS),
-        "temperature": payload.get("temperature", 0),
-    }
+    leviers = _leviers(payload, choisis[0], banc)
     # si l'utilisateur ne fixe pas d'effort, on prend celui de la production
     if leviers["effort"] in (None, "", "auto"):
         leviers["effort"] = banc.effort_serieux(choisis[0])
