@@ -381,7 +381,7 @@ def api_supprimer(nom: str):
 EXT_POLICE = (".ttf", ".otf", ".ttc")
 
 
-def _polices(p: Path) -> dict:
+def _polices(p: Path, con) -> dict:
     """Toutes les polices disponibles, groupees par provenance.
 
     Trois sources : le projet, le global partage, et les polices embarquees
@@ -390,7 +390,7 @@ def _polices(p: Path) -> dict:
     import catalogue_polices as catalogue
 
     try:
-        cat = catalogue.charger(p)
+        cat = catalogue.charger(p, con)
     except Exception as e:  # noqa: BLE001 - l'interface ne doit pas tomber
         return {
             "projet": [], "global": [], "babeldoc": [], "toutes": [],
@@ -444,26 +444,54 @@ def _polices(p: Path) -> dict:
     }
 
 
-def _contextes(p: Path) -> dict:
-    """Un contexte JSON par PDF, plus le lot."""
-    d = p / DOSSIER_CONTEXTE
-    if not d.is_dir():
-        return {"lot": None, "pdfs": []}
-    out = []
-    for f in sorted(d.glob("*.json")):
-        if f.name.startswith("_"):
-            continue
+def _lire_contexte(con, pdf_id: int) -> dict | None:
+    """Le contexte d'un PDF, avec le resume de chaque page."""
+    row = con.execute("SELECT * FROM contexte WHERE pdf_id = ?", (pdf_id,)).fetchone()
+    if row is None:
+        return None
+    pages = {
+        str(r["numero"]): (r["resume"] or "")
+        for r in con.execute(
+            "SELECT numero, resume FROM page_contexte"
+            " WHERE contexte_id = ? ORDER BY numero", (row["id"],))
+    }
+
+    def _liste(texte):
         try:
-            c = json.loads(f.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            c = {}
+            v = json.loads(texte or "[]")
+            return v if isinstance(v, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    return {
+        "resume": row["resume"] or "",
+        "points": _liste(row["points"]),
+        "termes_cles": _liste(row["termes_cles"]),
+        "pages": pages,
+    }
+
+
+def _contextes(con) -> dict:
+    """Les contextes en base : un par PDF, plus le lot."""
+    out = []
+    for r in con.execute(
+        "SELECT p.nom AS nom, c.id AS cid, c.points FROM contexte c"
+        " JOIN pdf p ON p.id = c.pdf_id ORDER BY p.nom"
+    ):
+        try:
+            points = json.loads(r["points"] or "[]")
+        except json.JSONDecodeError:
+            points = []
         out.append({
-            "cle": f.stem,
-            "fichier": c.get("fichier", f.stem + ".pdf"),
-            "pages": len(c.get("pages", {})),
-            "points": len(c.get("points", [])),
+            "cle": Path(r["nom"]).stem,
+            "fichier": r["nom"],
+            "pages": con.execute(
+                "SELECT COUNT(*) FROM page_contexte WHERE contexte_id = ?",
+                (r["cid"],)
+            ).fetchone()[0],
+            "points": len(points) if isinstance(points, list) else 0,
         })
-    lot = (d / "_lot.json").is_file()
+    lot = con.execute("SELECT 1 FROM lot LIMIT 1").fetchone() is not None
     return {"lot": lot, "pdfs": out}
 
 
@@ -594,15 +622,33 @@ def api_polices_global():
 
 @app.get("/api/projets/{nom}/contexte/{cle}")
 def api_lire_contexte(nom: str, cle: str):
-    """Lit un contexte JSON. cle = nom du PDF sans extension, ou _lot."""
-    p = _projet(nom)
-    f = _fichier(p, f"{DOSSIER_CONTEXTE}/{cle}.json")
-    if not f.is_file():
-        raise HTTPException(404, "contexte introuvable")
-    try:
-        return {"contenu": json.loads(f.read_text(encoding="utf-8"))}
-    except (json.JSONDecodeError, OSError) as e:
-        raise HTTPException(500, f"contexte illisible : {e}")
+    """Le contexte d'un PDF, ou le lot. cle = nom du PDF sans extension, ou _lot.
+
+    Lu en base comme le reste. Un PDF renomme est retrouve par un nom qu'il a
+    porte : la cle peut donc etre un ancien nom.
+    """
+    import base as _b
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        if cle == "_lot":
+            row = con.execute("SELECT points FROM lot LIMIT 1").fetchone()
+            points = []
+            if row:
+                try:
+                    points = json.loads(row["points"] or "[]")
+                except json.JSONDecodeError:
+                    points = []
+            return {"contenu": {"points": points}}
+
+        pdf = _b.pdf_par_nom(con, cle)
+        if pdf is None:
+            raise HTTPException(404, "PDF inconnu du registre")
+        c = _lire_contexte(con, int(pdf["id"]))
+        if c is None:
+            raise HTTPException(404, "contexte introuvable")
+        c["fichier"] = pdf["nom"]
+        return {"contenu": c}
 
 
 @app.put("/api/projets/{nom}/contexte/{cle}")
@@ -620,46 +666,46 @@ def api_ecrire_contexte(nom: str, cle: str, payload: dict):
 
 @app.get("/api/projets/{nom}")
 def api_projet(nom: str):
-    p = _projet(nom)
-    if not p.is_dir():
-        raise HTTPException(404, "projet introuvable")
+    """Tout l'etat d'un projet, pour l'interface. Une seule connexion."""
+    p, ctx = _base(nom)
+    with ctx as con:
+        meta = {}
+        if (p / "projet.json").is_file():
+            try:
+                meta = json.loads((p / "projet.json").read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
 
-    meta = {}
-    if (p / "projet.json").is_file():
-        try:
-            meta = json.loads((p / "projet.json").read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+        def _liste(dossier: str, motif: str) -> list[dict]:
+            d = p / dossier
+            if not d.is_dir():
+                return []
+            return [
+                {
+                    "nom": f.name,
+                    "taille": f.stat().st_size,
+                    "modifie": datetime.fromtimestamp(f.stat().st_mtime).isoformat(
+                        timespec="seconds"
+                    ),
+                }
+                for f in sorted(d.glob(motif))
+                if f.is_file()
+            ]
 
-    def _liste(dossier: str, motif: str) -> list[dict]:
-        d = p / dossier
-        if not d.is_dir():
-            return []
-        return [
-            {
-                "nom": f.name,
-                "taille": f.stat().st_size,
-                "modifie": datetime.fromtimestamp(f.stat().st_mtime).isoformat(
-                    timespec="seconds"
-                ),
-            }
-            for f in sorted(d.glob(motif))
-            if f.is_file()
-        ]
-
-    return {
-        "nom": nom,
-        "meta": meta,
-        "source": _liste("source", "*.pdf"),
-        "traduits": _liste("traduits", "*.pdf"),
-        "downloads": _liste("downloads", "*"),
-        "polices_installees": _polices(p),
-        "contextes": _contextes(p),
-        "fichiers": {
-            cle: (p / chemin).is_file() for cle, chemin in FICHIERS_EDITABLES.items()
-        },
-        "etapes": _etat_projet(nom),
-    }
+        return {
+            "nom": nom,
+            "meta": meta,
+            "source": _liste("source", "*.pdf"),
+            "traduits": _liste("traduits", "*.pdf"),
+            "downloads": _liste("downloads", "*"),
+            "polices_installees": _polices(p, con),
+            "contextes": _contextes(con),
+            "fichiers": {
+                cle: (p / chemin).is_file()
+                for cle, chemin in FICHIERS_EDITABLES.items()
+            },
+            "etapes": _etat_projet(nom),
+        }
 
 
 # ---------------------------------------------------------------- api metier

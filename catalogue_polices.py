@@ -152,36 +152,74 @@ def projet_courant() -> Path | None:
     return None
 
 
-def charger(projet: Path | None = None) -> Catalogue:
-    """Construit le catalogue complet, avec le mapping en cascade."""
+def charger(projet: Path | None = None, con=None) -> Catalogue:
+    """Le catalogue des polices, plus le mapping en cascade.
+
+    con : connexion ouverte a etat.db. Sans elle, la connexion est ouverte
+    puis fermee ici — pratique pour un script, inutile dans une route qui en
+    a deja une.
+    """
+    import contextlib
+
+    fermeture = contextlib.nullcontext(con) if con is not None else None
+    if fermeture is None:
+        return _charger_interne(projet)
+    return _charger_interne(projet)
+
+
+def _charger_interne(projet: Path | None) -> Catalogue:
+    """Implémentation : ouvre sa propre connexion si le projet existe."""
     cat = Catalogue()
 
-    # --- les fichiers, par provenance
-    globales = _lister_dossier(POLICES_GLOBALES, "global")
-    cache = _lister_dossier(cache_babeldoc(), "babeldoc")
-
-    projet = projet or projet_courant()
-    du_projet: list[Police] = []
+    ctx = None
     if projet is not None:
-        du_projet = _lister_dossier(projet / "analyse" / "polices", "projet")
+        try:
+            import base as _b
 
-    # l'ordre compte : le projet d'abord, puis le global, puis babeldoc.
-    # Un nom en double garde la premiere occurrence (la plus specifique).
-    vus: set[str] = set()
-    for groupe in (du_projet, globales, cache):
-        for p in groupe:
-            if p.nom in vus:
-                continue
-            vus.add(p.nom)
-            cat.polices.append(p)
+            ctx = _b.connecter(projet)
+            ctx.__enter__()
+        except Exception:  # noqa: BLE001 - le catalogue ne doit rien bloquer
+            ctx = None
 
-    # --- le mapping, en cascade : projet > global
-    if projet is not None:
-        for nom, val in _lire_csv(projet / "analyse" / "polices.csv", "projet").items():
-            cat.mapping[nom] = val
-    for nom, val in _lire_csv(CSV_GLOBAL, "global").items():
-        if nom not in cat.mapping:
-            cat.mapping[nom] = val
+    try:
+        globales = _lister_dossier(POLICES_GLOBALES, "global")
+        cache = _lister_dossier(cache_babeldoc(), "babeldoc")
+
+        du_projet: list[Police] = []
+        if projet is not None:
+            du_projet = _lister_dossier(projet / "analyse" / "polices", "projet")
+
+        vus: set[str] = set()
+        for groupe in (du_projet, globales, cache):
+            for p in groupe:
+                if p.nom in vus:
+                    continue
+                vus.add(p.nom)
+                cat.polices.append(p)
+
+        if ctx is not None:
+            # le mapping vient de la base : projet d'abord, puis global
+            for r in ctx.execute(
+                "SELECT police_origine, remplacement, origine FROM police"
+                " WHERE remplacement <> ''"
+            ):
+                cat.mapping[r["police_origine"]] = (
+                    r["remplacement"], r["origine"], "projet",
+                )
+            # le global ne complete que ce que la base ne dit pas
+            for k, v in _lire_csv(CSV_GLOBAL, "global").items():
+                cat.mapping.setdefault(k, v)
+        else:
+            if projet is not None:
+                for k, v in _lire_csv(
+                    projet / "analyse" / "polices.csv", "projet"
+                ).items():
+                    cat.mapping[k] = v
+            for k, v in _lire_csv(CSV_GLOBAL, "global").items():
+                cat.mapping.setdefault(k, v)
+    finally:
+        if ctx is not None:
+            ctx.__exit__(None, None, None)
 
     return cat
 
