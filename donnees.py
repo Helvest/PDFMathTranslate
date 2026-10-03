@@ -24,7 +24,7 @@ import base as db
 
 def upsert_terme(con, source: str, target: str, tgt_lng: str = "fr",
                  origine: str = "auto", occurrences: int = 0,
-                 nb_pages: int = 0) -> int:
+                 nb_pages: int = 0, definition: str = "") -> int:
     """Cree ou met a jour un terme. Renvoie son id.
 
     Une cible modifiee a la main passe en origine='manuel' : c'est la meme
@@ -35,20 +35,31 @@ def upsert_terme(con, source: str, target: str, tgt_lng: str = "fr",
     if row is None:
         cur = con.execute(
             "INSERT INTO glossaire (source, target, tgt_lng, origine,"
-            " occurrences, nb_pages, maj) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (source, target, tgt_lng, origine, occurrences, nb_pages,
-             db.maintenant()),
+            " definition, occurrences, nb_pages, maj)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (source, target, tgt_lng, origine, definition, occurrences,
+             nb_pages, db.maintenant()),
         )
         return int(cur.lastrowid)
 
     gid = int(row["id"])
     if row["target"] != target and origine == "auto":
         origine = "manuel"
-    con.execute(
-        "UPDATE glossaire SET target = ?, tgt_lng = ?, origine = ?,"
-        " occurrences = ?, nb_pages = ?, maj = ? WHERE id = ?",
-        (target, tgt_lng, origine, occurrences, nb_pages, db.maintenant(), gid),
-    )
+    # une definition deja relue ne s'ecrase pas : elle vient d'un agent
+    if definition:
+        con.execute(
+            "UPDATE glossaire SET target = ?, tgt_lng = ?, origine = ?,"
+            " definition = ?, occurrences = ?, nb_pages = ?, maj = ? WHERE id = ?",
+            (target, tgt_lng, origine, definition, occurrences, nb_pages,
+             db.maintenant(), gid),
+        )
+    else:
+        con.execute(
+            "UPDATE glossaire SET target = ?, tgt_lng = ?, origine = ?,"
+            " occurrences = ?, nb_pages = ?, maj = ? WHERE id = ?",
+            (target, tgt_lng, origine, occurrences, nb_pages,
+             db.maintenant(), gid),
+        )
     return gid
 
 
@@ -114,6 +125,7 @@ def lister_termes(con, orphelins_seulement: bool = False) -> list[dict]:
             "id": r["id"], "source": r["source"], "target": r["target"],
             "tgt_lng": r["tgt_lng"], "origine": r["origine"],
             "occurrences": r["occurrences"], "nb_pages": r["nb_pages"],
+            "definition": r["definition"] or "",
             "sources": sources,
             "orphelin": not sources,
         })

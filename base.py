@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS glossaire (
     target      TEXT NOT NULL,
     tgt_lng     TEXT NOT NULL DEFAULT 'fr',
     origine     TEXT NOT NULL DEFAULT 'auto',
+    definition  TEXT NOT NULL DEFAULT '',
     occurrences INTEGER NOT NULL DEFAULT 0,
     nb_pages    INTEGER NOT NULL DEFAULT 0,
     maj         TEXT
@@ -144,22 +145,63 @@ def projet(nom: str | None = None) -> Path | None:
 
 @contextlib.contextmanager
 def connecter(projet: Path):
-    """Connexion, schema cree au besoin. Erreur claire si la base est corrompue."""
+    """Connexion, schema cree au besoin.
+
+    Une seule sortie guarantee : toute exception ferme la connexion avant de
+    remonter. Sans cela, une base corrompue laissait un handle ouvert et
+    Windows refusait ensuite de supprimer le fichier (vu par test_base).
+
+    Erreur claire si la base est corrompue ou d'une version incompatible.
+    """
     f = chemin_base(projet)
     f.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(f), timeout=10)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys = ON")
+
+    con: sqlite3.Connection | None = None
     try:
-        con.executescript(SCHEMA)
-    except sqlite3.DatabaseError as e:
-        con.close()
-        raise BaseInvalide(f"{f} illisible ou incompatible : {e}") from e
-    try:
+        # timeout=30 : une analyse longue tient une transaction ouverte, et
+        # l'interface doit pouvoir lire pendant ce temps (le WAL le permet).
+        con = sqlite3.connect(str(f), timeout=30)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA foreign_keys = ON")
+        con.execute("PRAGMA busy_timeout = 30000")
+        # WAL : les lectures ne bloquent pas l'ecriture. Changer de mode est
+        # un acces exclusif : si une analyse tient une transaction, ca echoue
+        # sans importance — le mode sera pose a la premiere connexion libre.
+        try:
+            con.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError:
+            pass
+
+        if not _schema_present(con):
+            con.executescript(SCHEMA)
+
         yield con
         con.commit()
+    except sqlite3.DatabaseError as e:
+        raise BaseInvalide(f"{f} illisible ou incompatible : {e}") from e
+    except BaseException:
+        if con is not None:
+            con.rollback()
+        raise
     finally:
-        con.close()
+        if con is not None:
+            try:
+                # sans checkpoint explicite, etat.db-wal reste ouvert et
+                # Windows refuse ensuite de supprimer le dossier
+                con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
+            con.close()
+
+
+def _schema_present(con) -> bool:
+    """Le schema est-il deja en place ? Une requete suffit."""
+    try:
+        return con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pdf'"
+        ).fetchone() is not None
+    except sqlite3.DatabaseError:
+        return False
 
 
 def maintenant() -> str:

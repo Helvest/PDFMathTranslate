@@ -1223,6 +1223,7 @@ async function vueGlossaire(v) {
     <div class="scroll-tab"><table id="tab-gloss"><tr>
       ${entete("glossaire", "source", "Source", 'style="width:26%"')}
       ${entete("glossaire", "target", "Cible", 'style="width:26%"')}
+      <th>Définition</th>
       ${entete("glossaire", "occurrences", "Occ.")}
       <th>Pages</th>
       ${entete("glossaire", "nb_pages", "Nb p.")}
@@ -1236,7 +1237,7 @@ async function vueGlossaire(v) {
       const pdf = l.sources[0]?.pdf || "(sans PDF)";
       if (pdf !== dernierPdf) {
         const n = affiche.filter((x) => (x.sources[0]?.pdf || "(sans PDF)") === pdf).length;
-        html += `<tr class="groupe"><td colspan="7">${echapper(pdf)}
+        html += `<tr class="groupe"><td colspan="8">${echapper(pdf)}
           <span class="faible" style="font-weight:400"> — ${n} terme(s)</span></td></tr>`;
         dernierPdf = pdf;
       }
@@ -1248,6 +1249,7 @@ async function vueGlossaire(v) {
     html += `<tr${piege} data-id="${l.id}">
       <td><input type="text" data-src value="${echapper(l.source)}" style="width:100%"></td>
       <td><input type="text" data-tgt value="${echapper(l.target)}" style="width:100%"></td>
+      <td class="faible" style="font-size:11px">${echapper(l.definition || "—")}</td>
       <td class="faible">${echapper(l.occurrences || "—")}</td>
       <td><input type="text" data-pages
         value="${echapper(l.sources.flatMap((s) => s.pages).join(","))}"

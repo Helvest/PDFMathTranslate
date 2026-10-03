@@ -21,6 +21,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+
 import base as _db
 import donnees as _donnees
 import json
@@ -45,7 +47,9 @@ MODEL = os.environ.get("PDF2ZH_MODEL", "")
 CHUNK_CHARS = 5000
 # Sous ce nombre de caracteres, une page n'a rien a extraire.
 MIN_PAGE_CHARS = 40
-TIMEOUT = 300
+# space-bunny-alpha raisonne avant de repondre : sur une page dense, un
+# appel peut depasser 2 minutes. 600 s evite les timeouts sur le glossaire.
+TIMEOUT = int(os.environ.get("PDF2ZH_TIMEOUT", "600"))
 
 # ---------------------------------------------------------------- LLM
 
@@ -122,6 +126,11 @@ def llm(prompt: str) -> str:
         return contenu
     except urllib.error.HTTPError as e:
         print(f"    ! HTTP {e.code}: {e.read().decode()[:120]}", file=sys.stderr)
+    except urllib.error.URLError as e:
+        raison = getattr(e, "reason", e)
+        print(f"    ! {type(raison).__name__}: {str(raison)[:120]}"
+              + (" — cette page sera sautee" if isinstance(raison, TimeoutError)
+                 else ""), file=sys.stderr)
     except Exception as e:
         print(f"    ! {type(e).__name__}: {str(e)[:120]}", file=sys.stderr)
     return ""
@@ -974,130 +983,138 @@ Reponds UNIQUEMENT par un tableau JSON, sans commentaire :
 def step_glossary(
     pdfs: list[Path], work: Path, con, ctxs: list[dict], lang_out: str
 ) -> None:
-    """Passe 2 : extraction du glossaire, page par page, avec le contexte."""
-    print("\n[3/3] Glossaire (passe 2, LLM)")
+    """Extraction par sous-agents paralleles, puis fusion.
 
-    # les consignes de l'utilisateur s'appliquent aussi ici : s'il a impose une
-    # traduction, le glossaire doit la reprendre a l'identique.
-    consignes = _lire_consignes(work / "consignes-contexte.md")
+    Les agents sont aveugles et ne se voient pas entre eux : ils se recouvrent,
+    c'est voulu. Un agent de fusion tranche ensuite avec les consignes et le
+    glossaire deja valide. C'est plus rapide qu'une passe sequentielle, et
+    l'isolement evite qu'une page biaise les suivantes.
+    """
+    print("\n[3/3] Glossaire (sous-agents en parallele + fusion)")
+    import agents
+
+    consignes = _lire_consignes(work / "consignes-glossaire.md") or _lire_consignes(
+        work / "consignes-contexte.md"
+    )
     if consignes:
-        print("  consignes-contexte.md lu")
+        print("  consignes lues")
 
-    existing = {
-        r["source"]: dict(r) for r in con.execute("SELECT * FROM glossaire")
-    }
+    # --- ce qui est deja valide : jamais ecrase
+    existing = {r["source"]: dict(r) for r in con.execute("SELECT * FROM glossaire")}
     if existing:
         print(f"  {len(existing)} termes deja presents (conserves tels quels)")
 
-    # ou chaque terme a ete vu : {source: [(pdf_id, [pages]), ...]}
-    origin: dict[str, list[tuple[int, list[int]]]] = {}
-    found: dict[str, str] = {}
-    total_pages = sum(len(pdf_pages(p)) for p in pdfs)
+    # --- le plan : une tache par bloc, une page longue donne plusieurs blocs
+    pages = [(pdf.name, n, t) for pdf in pdfs for n, t in enumerate(pdf_pages(pdf), 1)]
+    taches = agents.planifier(pages)
+    print(f"  {len(pages)} page(s) -> {len(taches)} bloc(s) "
+          f"pour {agents.AGENTS_PARALLELES} agents")
+
+    lot = _resume_lot(ctxs)
+    resumes = {c.get("fichier"): c for c in ctxs if c.get("fichier")}
+
+    def _une_tache(t: dict) -> tuple[str, int, list[dict]]:
+        ctx_pdf = resumes.get(t["pdf"], {})
+        prompt = agents.prompt_extraction(
+            t["texte"],
+            consignes=consignes,
+            lot=lot,
+            document=ctx_pdf.get("resume", ""),
+            page=(ctx_pdf.get("pages", {}) or {}).get(str(t["page"]), ""),
+            ctx=_options_agents(con),
+        )
+        return t["pdf"], t["page"], agents.lire_reponse(llm(prompt))
+
+    # --- les agents, en parallele
+    propositions: list[dict] = []
+    par_page: dict[tuple[str, int], list[dict]] = {}
     fait = 0
-    # contexte du lot : la vue condensee de tous les documents
-    global_ctx = _resume_lot(ctxs)
+    for lot_taches in _par_blots(taches, agents.AGENTS_PARALLELES):
+        with ThreadPoolExecutor(max_workers=agents.AGENTS_PARALLELES) as ex:
+            for nom_pdf, numero, termes in ex.map(_une_tache, lot_taches):
+                if termes:
+                    par_page.setdefault((nom_pdf, numero), []).extend(termes)
+                    propositions.extend(termes)
+                fait += 1
+        prog(fait, len(taches), "extraction")
+        if propositions:
+            print(f"    {fait}/{len(taches)} blocs — {len(propositions)} propositions")
 
+    if not propositions:
+        print("  aucune proposition — le glossaire reste inchange")
+        return
+
+    # --- la fusion : un agent voit tous les doublons d'un coup
+    print(f"  fusion de {len(propositions)} propositions...")
+    prompt = agents.prompt_fusion(
+        propositions,
+        existant=[{"src": k, "tgt": v["target"]} for k, v in existing.items()],
+        consignes=consignes,
+    )
+    fusionnes = agents.lire_reponse(llm(prompt))
+    if not fusionnes:
+        # l'agent de fusion a echoue : on garde les propositions brutes plutot
+        # que de perdre le travail des sous-agents
+        fusionnes = propositions
+        print("    fusion sans reponse — on garde les propositions brutes")
+
+    # --- ecriture
+    nb = 0
+    for terme in fusionnes:
+        src_t = (terme.get("src") or "").strip()
+        tgt_t = (terme.get("tgt") or "").strip()
+        if not src_t or not tgt_t:
+            continue
+        gid = _donnees.upsert_terme(
+            con, src_t, tgt_t, lang_out,
+            "manuel" if src_t in existing else "auto",
+        )
+        if terme.get("definition"):
+            con.execute("UPDATE glossaire SET definition = ? WHERE id = ?",
+                        (terme["definition"][:400], gid))
+        # les pages : d'ou le terme a ete vu, par tous les agents
+        for (nom_pdf, numero), termes in par_page.items():
+            if any(x.get("src") == src_t for x in termes):
+                _donnees.lier_pages_terme(con, gid, _pdf_id(con, nom_pdf), [numero])
+        nb += 1
+
+    # le comptage d'occurrences, sur tous les PDF du projet
+    _compter_occurrences(con, pdfs)
+    total = con.execute("SELECT COUNT(*) FROM glossaire").fetchone()[0]
+    print(f"  {nb} terme(s) fusionne(s) -> {total} au total")
+
+
+def _options_agents(con) -> dict:
+    """Ce que les sous-agents doivent voir, d'apres les options du projet."""
+    import agents as _a
+
+    f = Path(__file__).resolve().parent.parent / "Projets"
+    return dict(_a.DEFAUTS)
+
+
+def _par_blots(items: list, n: int):
+    """Decoupe une liste en paquets de n, pour borner la memoire des threads."""
+    for i in range(0, len(items), n):
+        yield items[i:i + n]
+
+
+def _compter_occurrences(con, pdfs: list[Path]) -> None:
+    """Recompte occurrences et pages de chaque terme, sur tous les PDF."""
+    textes: dict[str, list[str]] = {}
     for pdf in pdfs:
-        pages = pdf_pages(pdf)
-        # le contexte de CE pdf, et le resume de chaque page
-        ctx_pdf = next((c for c in ctxs if c.get("fichier") == pdf.name), {})
-        res_pages = ctx_pdf.get("pages", {})
-        for n, txt in enumerate(pages, 1):
-            fait += 1
-            prog(fait, total_pages, f"{pdf.name} p{n}")
-            if len(txt) < MIN_PAGE_CHARS:
-                continue
-            page_ctx = (
-                f"{pdf.name} page {n} : {res_pages.get(str(n), '')}"
-                if res_pages.get(str(n))
-                else f"{pdf.name} page {n}"
-            )
-            for part, ch in enumerate(chunks(txt), 1):
-                known = ", ".join(sorted(found)[:60]) or "(aucun)"
-                raw = llm(
-                    GLOSS_PROMPT.format(
-                        consignes=consignes[:6000] or "(aucune consigne fournie)",
-                        lang_out=lang_out,
-                        global_ctx=global_ctx or "(aucun)",
-                        page_ctx=page_ctx + (f" (partie {part})" if part > 1 else ""),
-                        known=known,
-                        text=ch,
-                    )
-                )
-                added = 0
-                for item in parse_json_array(raw):
-                    if not isinstance(item, dict):
-                        continue
-                    src = str(item.get("src", "")).strip()
-                    tgt = str(item.get("tgt", "")).strip()
-                    if not src or not tgt or len(src) > 80:
-                        continue
-                    # on note (pdf_id, pages) : c'est ce qui permet de savoir
-                    # qu'un terme n'est orphelin que si TOUS ses PDF ont disparu
-                    pid = _pdf_id(con, pdf.name)
-                    origines = origin.setdefault(src, [])
-                    if not origines or origines[-1][0] != pid:
-                        origines.append((pid, []))
-                    origines[-1][1].append(n)
-                    if src in existing:
-                        continue  # deja valide a la main -> jamais ecrase
-                    if src in found:
-                        continue
-                    found[src] = tgt
-                    added += 1
-                if added:
-                    print(f"    {pdf.name} p{n}: +{added}")
+        if pdf.name not in textes:
+            textes[pdf.name] = pdf_pages(pdf)
 
-    # --- comptage : combien de fois chaque terme apparait, sur combien de pages
-    # On compte dans TOUS les PDF du projet, pas seulement ceux de ce run :
-    # sinon un terme d'un autre PDF afficherait 0 et le chiffre serait faux.
-    print("  comptage des occurrences...")
-    dossier_source = work.parent / "source"
-    tous = sorted(dossier_source.glob("*.pdf")) if dossier_source.is_dir() else pdfs
-    textes: dict[str, list[str]] = {p.name: pdf_pages(p) for p in tous}
-
-    def _compter(terme: str, _ignore) -> tuple[int, int]:
-        """(occurrences, pages) sur l'ensemble des PDF du projet."""
+    for r in con.execute("SELECT id, source FROM glossaire").fetchall():
         total = pages_vues = 0
         for pages in textes.values():
-            n, np_ = compter_terme(terme, pages)
+            n, np_ = compter_terme(r["source"], pages)
             total += n
             pages_vues += np_
-        return total, pages_vues
-
-    # Ecriture : upsert_terme protege la cible modifiee a la main (elle bascule
-    # en origine='manuel'), et page_glossaire porte les sources. Un terme
-    # sans ligne ici etant orphelin — c'est une requete, pas un drapeau.
-    n_ecrits = 0
-    for terme, cible in found.items():
-        gid = _donnees.upsert_terme(
-            con, terme, cible, lang_out,
-            "manuel" if terme in existing else "auto",
-            _compter(terme, None)[0], _compter(terme, None)[1],
+        con.execute(
+            "UPDATE glossaire SET occurrences = ?, nb_pages = ? WHERE id = ?",
+            (total, pages_vues, r["id"]),
         )
-        n_ecrits += 1
-        for pdf_id, pages in origin.get(terme, []):
-            _donnees.lier_pages_terme(con, gid, pdf_id, pages)
-
-    # les termes deja connus sont lies a leurs pages memes s'ils n'ont pas ete
-    # re-vus dans ce run : sinon ils deviendraient orphelins a tort
-    for terme, ligne in existing.items():
-        gid = con.execute("SELECT id FROM glossaire WHERE source = ?",
-                          (terme,)).fetchone()
-        if gid is None:
-            continue
-        deja = con.execute(
-            "SELECT COUNT(*) FROM page_glossaire WHERE glossaire_id = ?",
-            (gid["id"],)).fetchone()[0]
-        if not deja:
-            for pdf_id, pages in origin.get(terme, []):
-                _donnees.lier_pages_terme(con, gid["id"], pdf_id, pages)
-
-    total = con.execute("SELECT COUNT(*) FROM glossaire").fetchone()[0]
-    print(f"  +{len(found)} nouveaux sur {total} termes")
-
-
-# ---------------------------------------------------------------- io
 
 
 MODELE_CONSIGNES_CONTEXTE = """# Consignes pour le contexte
