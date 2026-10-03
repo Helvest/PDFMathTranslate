@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Passe d'analyse d'un lot de PDFs : contexte, glossaire, polices.
 
-Produit dans <projet>/analyse/ :
-  contexte/      un .json par PDF (resume, points, termes, pages) + _lot.json
-  glossaire.csv  source,target,tgt_lng,source_pdf   (format babeldoc + origine)
-  polices.csv    police_origine,famille,fichier_remplacement,source_pdf
+Tout est ecrit dans <projet>/analyse/etat.db : contexte, glossaire et
+polices. Les CSV n'existent plus comme stockage — le glossaire n'est exporte
+en CSV que temporairement, au moment de la traduction, parce que BabelDOC ne
+sait lire que ca.
+
   polices/       dossier ou deposer les TTF de remplacement
+
+Les tables many-to-many (page_glossaire, police_polices) portent les sources :
+un terme n'est orphelin que si TOUS ses PDF ont disparu.
 
 Relancer le script ne detruit RIEN : les entrees deja presentes (donc deja
 corrigees a la main) sont conservees, seules les nouveautes sont ajoutees.
@@ -17,7 +21,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
+import base as _db
+import donnees as _donnees
 import json
 import os
 import re
@@ -207,6 +212,11 @@ def compter_terme(terme: str, pages: list[str]) -> tuple[int, int]:
             total += n
             nb_pages += 1
     return total, nb_pages
+
+
+def pdf_fonts_names(path: Path) -> list[str]:
+    """Les noms de police d'un PDF, sans la famille. Pour lier l'usage."""
+    return [nom for _fam, nom in pdf_fonts(path)]
 
 
 def chunks(text: str) -> list[str]:
@@ -443,7 +453,7 @@ def _chercher_manquantes(
 def step_fonts(
     pdfs: list[Path],
     work: Path,
-    csv_path: Path,
+    con,
     font_dir: Path,
     auto_download: bool = True,
     contexte: str = "",
@@ -454,12 +464,9 @@ def step_fonts(
     trois sources. Les archives vont dans <projet>/downloads/ ; rien n'est
     installe automatiquement dans polices/ (c'est un choix manuel).
 
-    Colonnes du CSV, dans l'ordre ou on les lit a la main :
-      police_origine      la police du PDF (remplie par le script)
-      remplacement        le fichier choisi (a remplir, ou pre-rempli)
-      origine             auto | manuel | defaut
-      famille             regroupement, sert a la recherche
-      pdfs                quels PDF l'utilisent (informatif, en dernier)
+    Tout est ecrit dans etat.db : la table police porte le choix, et
+    police_polices porte l'usage par PDF (spans, pages). C'est cette table
+    qui permet de savoir si une police est orpheline.
     """
     print("\n[1/3] Polices (sans LLM)")
     found: dict[str, dict] = {}
@@ -479,12 +486,10 @@ def step_fonts(
     print(f"  {len(found)} polices distinctes, {len({v['famille'] for v in found.values()})} familles")
 
     # existant : on ne remplace jamais un fichier deja choisi a la main
-    existing: dict[str, dict] = {}
-    if csv_path.exists():
-        with csv_path.open(encoding="utf-8-sig", newline="") as f:
-            for row in csv.DictReader(f):
-                if row.get("police_origine"):
-                    existing[row["police_origine"]] = row
+    existing = {
+        r["police_origine"]: dict(r) for r in con.execute("SELECT * FROM police")
+    }
+    if existing:
         print(f"  {len(existing)} entrees deja presentes (conservees)")
 
     # un TTF du bon nom deja depose dans polices/ -> pre-remplissage
@@ -532,85 +537,39 @@ def step_fonts(
     # `remplacement` = ce qui est REELLEMENT installe (fichier present dans
     # polices/). `propose` = ce que la recherche a trouve, a copier depuis
     # <projet>/downloads/ si on le veut.
-    rows, seen = [], set()
-    for name, r in existing.items():
-        if name not in found:
-            continue
-        e = found[name]
-        ancien_fichier = (r.get("remplacement") or "").strip()
-        ancien_propose = (r.get("propose") or "").strip()
+    # Ecriture : la table police porte le choix, police_polices porte l'usage.
+    # Une police sans ligne dans police_polices est orpheline — c'est une
+    # requete, pas un drapeau a maintenir.
+    n_auto = n_man = n_def = 0
+    usages: dict[str, list[tuple[Path, dict]]] = {}
+    for pdf in pdfs:
+        vus = pdf_fonts_usage(pdf)
+        for nom in pdf_fonts_names(pdf):
+            if nom in vus:
+                usages.setdefault(nom, []).append((pdf, vus[nom]))
 
-        # option A : si l'utilisateur a change la valeur par rapport a ce que
-        # le systeme avait propose, la ligne devient "manuel".
-        if ancien_fichier and ancien_fichier != ancien_propose and ancien_propose:
+    for name, e in sorted(found.items()):
+        ancien = existing.get(name, {})
+        remplacement = (ancien.get("remplacement") or "").strip()
+        origine = (ancien.get("origine") or "").strip() or "defaut"
+        if remplacement and _fichier_present(remplacement, font_dir):
             origine = "manuel"
-        elif ancien_fichier and _fichier_present(ancien_fichier, font_dir):
-            origine = "manuel"
-        elif e.get("propose"):
-            origine = "auto"
-        else:
-            origine = "defaut"
 
-        rows.append(
-            {
-                "police_origine": name,
-                "remplacement": e["fichier"],
-                "origine": origine,
-                "propose": e.get("propose", ""),
-                "raison": e.get("raison", ""),
-                "famille": r.get("famille") or e["famille"],
-                "spans": e.get("spans", 0),
-                "pages": len(e.get("pages", set())),
-                "nb_pdfs": len(e["pdfs"]),
-                "pdfs": _resumer_pdfs(e["pdfs"]),
-            }
+        pid = _donnees.upsert_police(
+            con, name, remplacement, origine,
+            e.get("propose", ""), e.get("raison", ""), e["famille"],
         )
-        seen.add(name)
+        n_auto += origine == "auto"
+        n_man += origine == "manuel"
+        n_def += origine == "defaut"
 
-    added = 0
-    for name in sorted(found):
-        if name in seen:
-            continue
-        added += 1
-        e = found[name]
-        rows.append(
-            {
-                "police_origine": name,
-                "remplacement": e["fichier"],
-                "origine": e["origine"],
-                "propose": e.get("propose", ""),
-                "raison": e.get("raison", ""),
-                "famille": e["famille"],
-                "spans": e.get("spans", 0),
-                "pages": len(e.get("pages", set())),
-                "nb_pdfs": len(e["pdfs"]),
-                "pdfs": _resumer_pdfs(e["pdfs"]),
-            }
-        )
+        for pdf, u in usages.get(name, []):
+            _donnees.lier_police(con, pid, _pdf_id(con, pdf.name),
+                                 u["spans"], u["pages"])
 
-    write_csv(
-        csv_path,
-        [
-            "police_origine",
-            "remplacement",
-            "origine",
-            "propose",
-            "raison",
-            "famille",
-            "spans",
-            "pages",
-            "nb_pdfs",
-            "pdfs",
-        ],
-        rows,
-    )
-    n_auto = sum(1 for r in rows if r["origine"] == "auto")
-    n_man = sum(1 for r in rows if r["origine"] == "manuel")
-    n_def = sum(1 for r in rows if r["origine"] == "defaut")
-    print(
-        f"  +{added} nouvelles -> {csv_path.name} ({len(rows)} lignes : "
-        f"{n_auto} auto, {n_man} manuel, {n_def} defaut)"
-    )
+    added = sum(1 for n in found if n not in existing)
+    print(f"  +{added} nouvelles sur {len(found)} polices "
+          f"({n_auto} auto, {n_man} manuel, {n_def} defaut)")
 
 
 def _resumer_pdfs(noms) -> str:
@@ -684,15 +643,116 @@ def _lire_ligne(raw: str, prefixe: str) -> str:
     return ""
 
 
-def _lire_contexte_pdf(chemin: Path) -> dict | None:
-    """Lit un contexte JSON. None si absent ou illisible."""
-    if not chemin.is_file():
+# ---------------------------------------------------------------- base
+#
+# Le contexte, le glossaire et les polices vivent dans etat.db. Les CSV ne
+# survivent que comme export temporaire pour BabelDOC, qui ne sait lire que
+# ca. Aucun fichier n'est donc ecrit ici, hormis les .ttf.
+
+
+def _import_registre(con, projet: Path) -> None:
+    """Aligne le registre sur le disque, puis ne garde que les PDF a traiter.
+
+    Un PDF marque 'ignore' par l'utilisateur est saute, mais garde ses
+    donnees : c'est tout l'interet du registre.
+    """
+    import registre
+
+    r = registre.synchroniser(con, projet)
+    if r["nouveaux"] or r["absents"]:
+        print(f"  registre : {len(r['nouveaux'])} nouveau(x), "
+              f"{len(r['absents'])} absent(s)")
+
+
+def _pdf_id(con, nom_pdf: str) -> int:
+    """L'id du PDF dans la base, enregistre au passage s'il est nouveau.
+
+    On passe par le nom, ou par un nom que le PDF a porte : c'est ce qui fait
+    qu'un PDF renomme retrouve son contexte.
+    """
+    row = _db.pdf_par_nom(con, nom_pdf)
+    if row is not None:
+        if row["etat"] != "present":
+            _db.mettre_pdf_etat(con, row["id"], "present")
+        return int(row["id"])
+    return _db.enregistrer_pdf(con, nom_pdf, "")
+
+
+def _ecrire_contexte(con, pdf_id: int, resume: str, points: list[str],
+                     pages: dict[str, str]) -> None:
+    con.execute("DELETE FROM page_contexte WHERE contexte_id IN"
+                " (SELECT id FROM contexte WHERE pdf_id = ?)", (pdf_id,))
+    row = con.execute("SELECT id FROM contexte WHERE pdf_id = ?", (pdf_id,)).fetchone()
+    if row is None:
+        cur = con.execute(
+            "INSERT INTO contexte (pdf_id, resume, points, termes_cles, maj)"
+            " VALUES (?, ?, ?, '[]', ?)",
+            (pdf_id, resume, _json(points), _db.maintenant()),
+        )
+        cid = int(cur.lastrowid)
+    else:
+        cid = int(row["id"])
+        con.execute(
+            "UPDATE contexte SET resume = ?, points = ?, maj = ? WHERE id = ?",
+            (resume, _json(points), _db.maintenant(), cid),
+        )
+    for numero, texte in sorted(pages.items(), key=lambda kv: int(kv[0])):
+        con.execute(
+            "INSERT OR REPLACE INTO page_contexte (contexte_id, numero, resume)"
+            " VALUES (?, ?, ?)", (cid, int(numero), texte),
+        )
+
+
+def _lire_contexte(con, pdf_id: int) -> dict | None:
+    row = con.execute("SELECT * FROM contexte WHERE pdf_id = ?", (pdf_id,)).fetchone()
+    if row is None:
         return None
+    pages = {
+        str(x["numero"]): (x["resume"] or "")
+        for x in con.execute(
+            "SELECT numero, resume FROM page_contexte"
+            " WHERE contexte_id = ? ORDER BY numero", (row["id"],))
+    }
+    return {
+        "fichier": "",
+        "resume": row["resume"] or "",
+        "points": _json_lire(row["points"]),
+        "termes_cles": _json_lire(row["termes_cles"]),
+        "pages": pages,
+    }
+
+
+def _ecrire_lot(con, points: list[str]) -> None:
+    row = con.execute("SELECT id FROM lot LIMIT 1").fetchone()
+    if row is None:
+        con.execute("INSERT INTO lot (points, maj) VALUES (?, ?)",
+                    (_json(points), _db.maintenant()))
+    else:
+        con.execute("UPDATE lot SET points = ?, maj = ? WHERE id = ?",
+                    (_json(points), _db.maintenant(), row["id"]))
+
+
+def _lire_lot(con) -> list[str]:
+    row = con.execute("SELECT points FROM lot LIMIT 1").fetchone()
+    return _json_lire(row["points"]) if row else []
+
+
+def _json(valeur) -> str:
+    import json as _j
+
+    return _j.dumps(valeur, ensure_ascii=False)
+
+
+def _json_lire(texte: str | None) -> list:
+    import json as _j
+
+    if not texte:
+        return []
     try:
-        return json.loads(chemin.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"  {chemin.name} illisible ({e}) -> recalcule", file=sys.stderr)
-        return None
+        v = _j.loads(texte)
+        return v if isinstance(v, list) else []
+    except ValueError:
+        return []
 
 
 def _resume_doc(c: dict) -> str:
@@ -717,15 +777,16 @@ def _resume_lot(ctxs: list[dict]) -> str:
     return "\n".join(out)
 
 
-def step_context(pdfs: list[Path], work: Path, ctx_dir: Path) -> list[dict]:
+def step_context(pdfs: list[Path], work: Path, con) -> list[dict]:
     """Passe 1 : contexte a TROIS niveaux, un fichier JSON par PDF.
 
     - lot  : commun a tous les documents, enrichi en traversant les PDFs
     - doc  : resume du document
     - page : resume de chaque page
 
-    Chaque PDF a son fichier <nom>.json dans ctx_dir. Un fichier deja present
-    est REUTILISE tel quel : supprime-le pour le recalculer.
+    Le contexte est ecrit dans etat.db, rattache au PDF par son id. Un
+    contexte deja present est REUTILISE tel quel : le supprimer en base
+    pour le recalculer.
 
     Retourne la liste des contextes (pour le glossaire et les polices).
     """
@@ -735,30 +796,22 @@ def step_context(pdfs: list[Path], work: Path, ctx_dir: Path) -> list[dict]:
     if consignes:
         print("  consignes-contexte.md lu")
 
-    ctx_dir.mkdir(parents=True, exist_ok=True)
-
     # lot persistant : il s'enrichit d'un run a l'autre
-    lot_path = ctx_dir / "_lot.json"
-    lot_lines: list[str] = []
-    if lot_path.is_file():
-        try:
-            lot_lines = json.loads(lot_path.read_text(encoding="utf-8")).get("points", [])
-        except (json.JSONDecodeError, OSError):
-            pass
-        if lot_lines:
-            print(f"  lot existant : {len(lot_lines)} points (conserves)")
+    lot_lines: list[str] = _lire_lot(con)
+    if lot_lines:
+        print(f"  lot existant : {len(lot_lines)} points (conserves)")
 
     total_pages = sum(len(pdf_pages(p)) for p in pdfs)
     fait = 0
     ctxs: list[dict] = []
 
     for pdf in pdfs:
-        cible = ctx_dir / f"{pdf.stem}.json"
-        deja = _lire_contexte_pdf(cible)
+        pid = _pdf_id(con, pdf.name)
+        deja = _lire_contexte(con, pid)
         if deja:
             nb = len(deja.get("pages", {}))
             print(f"  {pdf.name} : contexte deja present ({nb} pages) -> reutilise")
-            ctxs.append(deja)
+            ctxs.append({**deja, "fichier": pdf.name})
             fait += nb
             prog(fait, total_pages, pdf.name)
             continue
@@ -812,23 +865,13 @@ def step_context(pdfs: list[Path], work: Path, ctx_dir: Path) -> list[dict]:
             "termes_cles": [],
             "pages": pages_resume,
         }
-        cible.write_text(
-            json.dumps(ctx, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-        print(f"    -> {cible.name} ({len(pages_resume)} pages)")
-        ctxs.append(ctx)
+        _ecrire_contexte(con, pid, ctx["resume"], ctx["points"], pages_resume)
+        print(f"    -> {pdf.name} : {len(pages_resume)} pages")
+        ctxs.append({**ctx, "fichier": pdf.name})
 
     # meme convention que les fichiers de PDF : sans le prefixe "- "
-    lot_path.write_text(
-        json.dumps(
-            {"points": [l[2:] if l.startswith("- ") else l for l in lot_lines]},
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    print(f"  -> _lot.json : {len(lot_lines)} points")
+    _ecrire_lot(con, [l[2:] if l.startswith("- ") else l for l in lot_lines])
+    print(f"  -> lot : {len(lot_lines)} points")
     return ctxs
 
 
@@ -875,7 +918,7 @@ Reponds UNIQUEMENT par un tableau JSON, sans commentaire :
 
 
 def step_glossary(
-    pdfs: list[Path], work: Path, gloss_path: Path, ctxs: list[dict], lang_out: str
+    pdfs: list[Path], work: Path, con, ctxs: list[dict], lang_out: str
 ) -> None:
     """Passe 2 : extraction du glossaire, page par page, avec le contexte."""
     print("\n[3/3] Glossaire (passe 2, LLM)")
@@ -886,16 +929,14 @@ def step_glossary(
     if consignes:
         print("  consignes-contexte.md lu")
 
-    existing: dict[str, dict] = {}
-    if gloss_path.exists():
-        with gloss_path.open(encoding="utf-8-sig", newline="") as f:
-            for row in csv.DictReader(f):
-                if row.get("source"):
-                    existing[row["source"]] = dict(row)
+    existing = {
+        r["source"]: dict(r) for r in con.execute("SELECT * FROM glossaire")
+    }
+    if existing:
         print(f"  {len(existing)} termes deja presents (conserves tels quels)")
 
-    origin: dict[str, set] = {}
-    pages_src: dict[str, set] = {}
+    # ou chaque terme a ete vu : {source: [(pdf_id, [pages]), ...]}
+    origin: dict[str, list[tuple[int, list[int]]]] = {}
     found: dict[str, str] = {}
     total_pages = sum(len(pdf_pages(p)) for p in pdfs)
     fait = 0
@@ -937,8 +978,13 @@ def step_glossary(
                     tgt = str(item.get("tgt", "")).strip()
                     if not src or not tgt or len(src) > 80:
                         continue
-                    origin.setdefault(src, set()).add(pdf.name)
-                    pages_src.setdefault(src, set()).add(f"{pdf.name}:{n}")
+                    # on note (pdf_id, pages) : c'est ce qui permet de savoir
+                    # qu'un terme n'est orphelin que si TOUS ses PDF ont disparu
+                    pid = _pdf_id(con, pdf.name)
+                    origines = origin.setdefault(src, [])
+                    if not origines or origines[-1][0] != pid:
+                        origines.append((pid, []))
+                    origines[-1][1].append(n)
                     if src in existing:
                         continue  # deja valide a la main -> jamais ecrase
                     if src in found:
@@ -956,7 +1002,7 @@ def step_glossary(
     tous = sorted(dossier_source.glob("*.pdf")) if dossier_source.is_dir() else pdfs
     textes: dict[str, list[str]] = {p.name: pdf_pages(p) for p in tous}
 
-    def _compter(terme: str, _pdfs_du_terme: set) -> tuple[int, int]:
+    def _compter(terme: str, _ignore) -> tuple[int, int]:
         """(occurrences, pages) sur l'ensemble des PDF du projet."""
         total = pages_vues = 0
         for pages in textes.values():
@@ -965,69 +1011,39 @@ def step_glossary(
             pages_vues += np_
         return total, pages_vues
 
-    # un terme deja present garde son pdf d'origine, meme s'il reapparait ailleurs
-    def _fusion(src: str, ancien: str) -> str:
-        vus = set(filter(None, ancien.split("|")))
-        vus |= origin.get(src, set())
-        return "|".join(sorted(vus))
+    # Ecriture : upsert_terme protege la cible modifiee a la main (elle bascule
+    # en origine='manuel'), et page_glossaire porte les sources. Un terme
+    # sans ligne ici etant orphelin — c'est une requete, pas un drapeau.
+    n_ecrits = 0
+    for terme, cible in found.items():
+        gid = _donnees.upsert_terme(
+            con, terme, cible, lang_out,
+            "manuel" if terme in existing else "auto",
+            _compter(terme, None)[0], _compter(terme, None)[1],
+        )
+        n_ecrits += 1
+        for pdf_id, pages in origin.get(terme, []):
+            _donnees.lier_pages_terme(con, gid, pdf_id, pages)
 
-    rows, seen = [], set()
-    for src, ligne in existing.items():
-        rows.append(
-            {
-                "source": src,
-                "target": ligne.get("target", ""),
-                "tgt_lng": ligne.get("tgt_lng", lang_out) or lang_out,
-                "source_pdf": _fusion(src, ligne.get("source_pdf", "")),
-                "pages": "|".join(sorted(pages_src.get(src, set()))),
-                "origine": ligne.get("origine") or "auto",
-                "occurrences": _compter(src, origin.get(src, set()))[0],
-                "nb_pages": _compter(src, origin.get(src, set()))[1],
-            }
-        )
-        seen.add(src)
-    for src in sorted(found, key=str.lower):
-        if src in seen:
+    # les termes deja connus sont lies a leurs pages memes s'ils n'ont pas ete
+    # re-vus dans ce run : sinon ils deviendraient orphelins a tort
+    for terme, ligne in existing.items():
+        gid = con.execute("SELECT id FROM glossaire WHERE source = ?",
+                          (terme,)).fetchone()
+        if gid is None:
             continue
-        rows.append(
-            {
-                "source": src,
-                "target": found[src],
-                "tgt_lng": lang_out,
-                "source_pdf": _fusion(src, ""),
-                "pages": "|".join(sorted(pages_src.get(src, set()))),
-                "origine": "auto",
-                "occurrences": _compter(src, origin.get(src, set()))[0],
-                "nb_pages": _compter(src, origin.get(src, set()))[1],
-            }
-        )
-    write_csv(
-        gloss_path,
-        [
-            "source",
-            "target",
-            "tgt_lng",
-            "source_pdf",
-            "pages",
-            "origine",
-            "occurrences",
-            "nb_pages",
-        ],
-        rows,
-    )
-    print(f"  +{len(found)} nouveaux -> {gloss_path.name} ({len(rows)} lignes)")
+        deja = con.execute(
+            "SELECT COUNT(*) FROM page_glossaire WHERE glossaire_id = ?",
+            (gid["id"],)).fetchone()[0]
+        if not deja:
+            for pdf_id, pages in origin.get(terme, []):
+                _donnees.lier_pages_terme(con, gid["id"], pdf_id, pages)
+
+    total = con.execute("SELECT COUNT(*) FROM glossaire").fetchone()[0]
+    print(f"  +{len(found)} nouveaux sur {total} termes")
 
 
 # ---------------------------------------------------------------- io
-
-
-def write_csv(path: Path, fields: list[str], rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # newline="" + utf-8-sig : ouvrable directement dans Excel
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        w.writerows(rows)
 
 
 MODELE_CONSIGNES_CONTEXTE = """# Consignes pour le contexte
@@ -1233,44 +1249,48 @@ def main() -> int:
 
     # Le contexte nourrit les polices ET le glossaire : on le calcule d'abord
     # si l'etape est demandee. Sinon on relit les fichiers JSON existants.
-    ctx_dir = work / "contexte"
-    if a.ignorer_contexte:
-        for f in ctx_dir.glob("*.json"):
-            f.unlink()
-        print("  contextes existants effaces (--ignorer-contexte)")
+    # Une seule connexion pour tout le run : le contexte, les polices et le
+    # glossaire partagent les memes donnees.
+    with _db.connecter(projet) as con:
+        _import_registre(con, projet)
 
-    if "contexte" in etapes:
-        ctxs = step_context(pdfs, work, ctx_dir)
-    else:
-        ctxs = [
-            c
-            for f in sorted(ctx_dir.glob("*.json"))
-            if not f.name.startswith("_")
-            and (c := _lire_contexte_pdf(f)) is not None
-        ]
-        if ctxs:
-            print(f"  {len(ctxs)} contexte(s) PDF relu(s)")
+        if a.ignorer_contexte:
+            con.execute("DELETE FROM page_contexte")
+            con.execute("DELETE FROM contexte")
+            print("  contextes effaces (--ignorer-contexte)")
 
-    if "polices" in etapes:
-        step_fonts(
-            pdfs,
-            work,
-            work / "polices.csv",
-            font_dir,
-            auto_download=not a.no_download,
-            contexte=_resume_lot(ctxs),
-        )
-    if "glossaire" in etapes:
-        step_glossary(pdfs, work, work / "glossaire.csv", ctxs, a.lang_out)
+        if "contexte" in etapes:
+            ctxs = step_context(pdfs, work, con)
+        else:
+            ctxs = []
+            for pdf in pdfs:
+                c = _lire_contexte(con, _pdf_id(con, pdf.name))
+                if c:
+                    ctxs.append({**c, "fichier": pdf.name})
+            if ctxs:
+                print(f"  {len(ctxs)} contexte(s) PDF relu(s)")
 
-    print("\nTermine. A verifier/corriger :")
-    print(f"  {ctx_dir}  (un .json par PDF + _lot.json)")
-    print(f"  {work/'glossaire.csv'}")
-    print(f"  {work/'polices.csv'}")
-    print(f"  {work/'polices'}  (depose tes .ttf ici)")
-    print(f"  {work.parent/'downloads'}  (archives telechargees)")
-    print(f"\nPuis : bash traduire.sh   (apres branchement de ces fichiers)")
-    return 0
+
+        if "polices" in etapes:
+            step_fonts(
+                pdfs,
+                work,
+                con,
+                font_dir,
+                auto_download=not a.no_download,
+                contexte=_resume_lot(ctxs),
+            )
+        if "glossaire" in etapes:
+            step_glossary(pdfs, work, con, ctxs, a.lang_out)
+
+        print("\nTermine. Tout est dans etat.db. A verifier/corriger dans l'interface :")
+        print(f"  contexte  {con.execute('SELECT COUNT(*) FROM contexte').fetchone()[0]} document(s)")
+        print(f"  glossaire {con.execute('SELECT COUNT(*) FROM glossaire').fetchone()[0]} terme(s)")
+        print(f"  polices   {con.execute('SELECT COUNT(*) FROM police').fetchone()[0]} police(s)")
+        print(f"  {work/'polices'}  (depose tes .ttf ici)")
+
+        print("\nPuis : la traduction, depuis l'onglet PDFs ou : bash traduire.sh")
+        return 0
 
 
 if __name__ == "__main__":
