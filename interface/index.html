@@ -1794,7 +1794,9 @@ async function vueBanc(v, colTri) {
             <select id="b-effort" ${modelesNiveaux.length ? "" : "disabled"}
               <option value="auto">auto — celui de la production (${
                 cat.leviers.effort || "low"})</option>
-              ${modelesNiveaux.map((e) => `<option value="${e}">${e}</option>`).join("")}
+              ${modelesNiveaux.map((e) =>
+                `<option value="${e}" ${CHOIX.effort === e ? "selected" : ""}>${e}</option>`
+              ).join("")}
             </select></label>
           <label class="rangee"><span class="faible">Raisonnement</span>
             <select id="b-raison">

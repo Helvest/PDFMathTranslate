@@ -1486,7 +1486,12 @@ def api_banc_charge_lancer(payload: dict):
             BANC["erreur"] = f"{type(e).__name__}: {e}"
 
     threading.Thread(target=_travail, daemon=True).start()
-    return {"ok": True, "modele": modele["id"], "niveaux": niveaux}
+    # on renvoie la LISTE : la charge se mesure sur chaque modele coche.
+    # Cette ligne retournait encore `modele` (singulier), supprime quand on
+    # est passe a plusieurs modeles -> NameError, HTTP 500 au clic.
+    return {"ok": True,
+            "modeles": [m["id"] for m in modeles],
+            "niveaux": niveaux}
 
 
 @app.get("/api/banc/resultats")

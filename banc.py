@@ -595,6 +595,9 @@ def mesurer(modele: dict, scenario: str, leviers: dict, texte: str,
         n = noter(scenario, texte, r)
         n.update(scenario=scenario, modele=modele["id"], prompt_car=len(prompt),
                  repetitions=1)
+        # stats existe meme avec une seule mesure : sans elle, l'interface
+        # lit x.stats?.lat, obtient undefined, et affiche une cellule vide
+        n["stats"] = _repetitions([n])
         n["score"] = _score(scenario, n)["score"]
         n["criteres"] = _score(scenario, n)["criteres"]
         n["sortie_brute"] = r.get("sortie", "")[:4000] if r.get("ok") else ""
