@@ -1394,6 +1394,9 @@ def _leviers(payload: dict, modele: dict, banc) -> dict:
         # include_reasoning est l'inverse de "effort" : il dit si on VOIT
         # le raisonnement dans la reponse
         "include_reasoning": bool(payload.get("include_reasoning")),
+        # raisonnement=False : on coupe la reflexion. Le serveur ne le
+        # transmet que si l'utilisateur l'a explicitement demande.
+        **({"raisonnement": False} if payload.get("raisonnement") is False else {}),
     }
 
 
@@ -1418,14 +1421,15 @@ def api_banc_charge_lancer(payload: dict):
     choisis = [catalogue[i] for i in ids if i in catalogue]
     if not choisis:
         raise HTTPException(400, "aucun modele connu dans la selection")
+    # la charge se mesure sur CHAQUE modele coche : c'est ce qu'on compare
+    modeles = choisis
 
     niveaux = payload.get("niveaux") or [1, 2, 3, 4, 6, 8, 12, 16, 24]
     niveaux = sorted({int(n) for n in niveaux if 0 < int(n) <= 64})
     if not niveaux:
         raise HTTPException(400, "aucun niveau d'agents valide")
 
-    modele = choisis[0]
-    leviers = _leviers(payload, modele, banc)
+    leviers = _leviers(payload, choisis[0], banc)
     timeout = int(payload.get("timeout") or 180)
     BANC.update(etat="en_cours", log="", erreur="", fait=0, total=0,
                 debut=datetime.now().isoformat(timespec="seconds"))
@@ -1436,20 +1440,32 @@ def api_banc_charge_lancer(payload: dict):
             def _prog(r):
                 # on ecrit la ligne des qu'elle est connue : un banc de charge
                 # dure plusieurs minutes, l'utilisateur doit voir ca avancer
-                ligne = (f"{r['n_agents']} agents / {r['blocs']} blocs : "
-                         f"{r['reussis']} en {r['total_s']}s, "
-                         f"gain {r['gain']}x, lat moy {r['lat_moy']}s")
+                ligne = (f"{r.get('modele', '')} {r['n_agents']} agents / "
+                         f"{r['blocs']} blocs : {r['reussis']} en "
+                         f"{r['total_s']}s, gain {r['gain']}x")
                 lignes_log.append(ligne)
                 BANC["log"] = "\n".join(lignes_log)
                 for e in r.get("erreurs", []):
                     BANC["log"] += f"\n    ! {e}"
 
-            r = banc.lancer_charge(modele, niveaux, leviers, timeout=timeout,
-                                   progres=_prog)
+            resultats = []
+            for k, m in enumerate(modeles, 1):
+                BANC["log"] = "\n".join(lignes_log) + (
+                    f"\nmesure {k}/{len(modeles)} — {m['id']}"
+                    if len(modeles) > 1 else "")
+                resultats.append(
+                    banc.lancer_charge(m, niveaux, leviers, timeout=timeout,
+                                       progres=_prog))
+
             banc.BENCH.mkdir(parents=True, exist_ok=True)
-            banc.CHARGE.write_text(
-                json.dumps(r, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-            BANC["log"] += f"\n\nplafond : {r['tenu']} agents sans perte"
+            banc.CHARGE.write_text(json.dumps(
+                {"maj": datetime.now().isoformat(timespec="seconds"),
+                 "modeles": resultats,
+                 "tenu": max((x["tenu"] for x in resultats), default=0)},
+                ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            BANC["log"] += "\n\n" + "\n".join(
+                f"{x['modele']} : plafond {x['tenu']} agents sans perte"
+                for x in resultats)
             BANC["etat"] = "termine"
         except Exception as e:  # noqa: BLE001
             BANC["etat"] = "erreur"

@@ -158,9 +158,17 @@ def _construire(modele: dict, leviers: dict, prompt: str) -> dict:
     # la repetition est ce qui fait boucler un modele sur du JSON
     _met("repetition_penalty", "repetition_penalty")
 
-    # include_reasoning est l'inverse de "effort" : il dit si on VOIT le
-    # raisonnement dans la reponse. Les deux se combinent.
+    # Trois etats, a ne pas confondre :
+    #   effort              : a quel niveau le modele raisonne
+    #   include_reasoning   : est-ce qu'on VOIT ce raisonnement
+    #   raisonnement=False  : on coupe le raisonnement altogether
     inclure = leviers.get("include_reasoning")
+
+    if leviers.get("raisonnement") is False:
+        # on ne demande pas de raisonnement. Un modele qui l'impose refuserait
+        # la requete — on respecte sa contrainte plutot que d'echouer.
+        return corps
+
     if modele.get("efforts"):
         if leviers.get("effort"):
             corps["reasoning"] = {"enabled": True, "effort": leviers["effort"],
@@ -775,6 +783,7 @@ def mesurer_charge(modele: dict, n_agents: int, nb_blocs: int,
     # dire qu'on se dispute le service, pas qu'on gagne du temps
     lineaire = sum(lats)
     return {
+        "modele": modele["id"],
         "n_agents": n_agents,
         "blocs": len(blocs),
         "reussis": f"{len(ok)}/{len(resultats)}",

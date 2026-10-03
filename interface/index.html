@@ -818,44 +818,47 @@ function raison(texte) {
 
 // Un <select> de 425 modeles est inutilisable : on prend un champ texte
 // avec suggestions, et on affiche le modele choisi.
+// Un <select> de 425 modeles est inutilisable sans filtre : on prend un champ
+// texte avec suggestions, ET un vrai dropdown des modeles gratuits —
+// parce que ce sont les seuls qui nous interessent, et ils tiennent en 3 lignes.
 function champModele(cle, libelle, aide = "") {
   const o = S.options || {};
   const courant = o[cle] ?? "";
   const perf = perfModeles();
 
-  const suggestion = (q) => {
-    const t = q.trim().toLowerCase();
-    if (!t) return S.modeles.slice(0, 20);
-    return S.modeles.filter((m) => m.toLowerCase().includes(t)).slice(0, 20);
-  };
   // perfModeles renvoie des VALEURS, pas des listes : p.lat est un nombre.
-  // L'ancien code faisait p.lat.reduce(...) — une exception qui vidait
-  // silencieusement tout l'onglet Options.
   const detail = (m) => {
     const p = perf.get(m);
     if (!p) return "";
     const lat = Number(p.lat).toFixed(1);
     const tok = p.tok ? " · " + Math.round(Number(p.tok)) + " tok" : "";
     const echec = echecsModeles().get(m);
-    if (echec) return `\u2715 ${echec}`;
-    return `${lat}s${tok} · score ${p.exploitables || "—"}`;
+    return echec ? `\u2715 ${echec}` : `${lat}s${tok} · ${p.exploitables || "—"}`;
   };
 
-  const d = S.modeles.find((m) => m === courant);
+  const nom = (m) => (S.bancCatalogue?.modeles || []).find((x) => x.id === m)?.nom || "";
+
+  // les modeles gratuits d'abord : c'est ce qu'on choisit 95% du temps
+  const gratuits = (S.bancCatalogue?.modeles || []).filter((x) => x.gratuit);
+  const options = gratuits.map((x) =>
+    `<option value="${echapper(x.id)}"${x.id === courant ? " selected" : ""}>${
+      echapper((nom(x.id) || x.id).replace(/^\w+:\s*/, "") + "  — " + detail(x.id))}</option>`).join("");
+
   return `<label class="champ" data-champ="${echapper(cle)}">
     <span>${libelle}${aide ? " — " + aide : ""}</span>
-    <input type="text" data-opt="${echapper(cle)}" value="${echapper(courant)}"
-      list="liste-${echapper(cle)}" placeholder="nom exact du modèle"
-      autocomplete="off">
-    <datalist id="liste-${echapper(cle)}">
-      ${suggestion(courant).map((m) =>
-        `<option value="${echapper(m)}">${echapper(detail(m))}</option>`).join("")}
-    </datalist>
+    <select data-opt="${echapper(cle)}" style="width:100%">
+      <option value="">— aucun —</option>
+      ${courant && !gratuits.some((x) => x.id === courant)
+        ? `<option value="${echapper(courant)}" selected>${
+            echapper(courant)} (hors liste gratuite)</option>` : ""}
+      ${options}
+    </select>
     <span class="faible" data-info="${echapper(cle)}">
-      ${d ? (detail(d) || "aucune mesure") : "modèle hors liste du proxy"}
-    </span>
+      ${courant ? (detail(courant) || "aucune mesure") : "aucun modele choisi"}
+      — ${gratuits.length} modeles gratuits disponibles</span>
   </label>`;
 }
+
 
 // --- options ---
 // Liste deroulante des modeles, avec les chiffres du dernier bench en aide.
@@ -1664,6 +1667,11 @@ async function vueBanc(v, colTri) {
   const etat = d.etat || {};
   const enCours = etat.etat === "en_cours";
 
+  // ce que tu as choisi, conserve entre deux rendus. Sans ca, decocher un
+  // modele re-rendait la page et remettait scenarios, effort et source a zero.
+  S.bancChoix = S.bancChoix || {};
+  const CHOIX = S.bancChoix;
+
   let html = `<div class="bloc">
     <h2 class="titre">Banc — global</h2>
     <p class="faible" style="margin:0 0 9px">
@@ -1699,10 +1707,19 @@ async function vueBanc(v, colTri) {
   // ---------- les leviers ----------
   // Le modele choisi determine ce qui est disponible : on ne propose pas
   // un effort a un modele qui n'en liste pas.
-  const ids = [...v.querySelectorAll("[data-mod]:checked")].map((c) => c.dataset.mod);
   const cat = S.bancCatalogue || { modeles: [], leviers: {} };
+  // les modeles choisis, dans S.bancChoix — PAS dans le DOM : ce bloc s'ecrit
+  // avant que les cases a cocher n'existent, donc les lire ici donnait toujours
+  // zero modele, et le dropdown effort restait desactive au premier affichage
+  if (!CHOIX.modeles) CHOIX.modeles = [];
+  const ids = CHOIX.modeles;
   const choisi = cat.modeles.find((m) => m.id === ids[0]);
   const niveaux = choisi ? (choisi.efforts || []) : [];
+  // si aucun modele choisi, on prend le modele du projet : le dropdown montre
+  // alors les niveaux par defaut plutot que d'etre mort
+  const modelesNiveaux = choisi ? niveaux
+    : (cat.modeles.find((m) => m.id === (S.options?.model || ""))?.efforts
+       || Object.values(cat.leviers?.efforts_par_modele || {})[0] || []);
 
   html += `<div class="bloc">
     <h2 class="titre">Leviers de l'appel</h2>
@@ -1711,9 +1728,14 @@ async function vueBanc(v, colTri) {
       supportes par le modele sont listes en dessous, en lecture seule.</p>
     <div class="rangee">
       <label class="rangee"><span class="faible">Effort de raisonnement</span>
-        <select id="b-effort" ${niveaux.length ? "" : "disabled"}>
+        <select id="b-effort" ${modelesNiveaux.length ? "" : "disabled"}>
           <option value="auto">auto — celui de la production (${cat.leviers.effort || "low"})</option>
-          ${niveaux.map((e) => `<option value="${e}">${e}</option>`).join("")}
+          ${modelesNiveaux.map((e) => `<option value="${e}">${e}</option>`).join("")}
+        </select></label>
+      <label class="rangee"><span class="faible">Raisonnement</span>
+        <select id="b-raison">
+          <option value="1" ${CHOIX.raisonnement !== false ? "selected" : ""}>actif</option>
+          <option value="0" ${CHOIX.raisonnement === false ? "selected" : ""}>desactive</option>
         </select></label>
       <label class="rangee"><span class="faible">Tokens max</span>
         <input type="number" id="b-maxtok" value="${cat.leviers.max_tokens || 16000}"
@@ -1793,32 +1815,44 @@ async function vueBanc(v, colTri) {
   </div>`;
 
   // ---------- les scenarios ----------
-  // Chacun se teste seul. "Charge" est un scenario a part : elle dit combien
-  // d'agents le modele encaisse, et sort dans le meme comparatif.
+  // En haut, et dans l'ordre du pipeline. La charge n'est plus un scenario :
+  // elle se mesure a part, sur chaque modele coche.
+  const SCENARIOS = [
+    ["contexte", "Contexte", "le resume que lit le pipeline"],
+    ["glossaire", "Glossaire", "termes, traduction, definition"],
+    ["polices", "Polices", "les polices de remplacement a chercher"],
+    ["traduction", "Traduction", "le texte source vers le francais"],
+  ];
+  if (!CHOIX.scenarios) CHOIX.scenarios = SCENARIOS.map(([c]) => c);
+  const scens = CHOIX.scenarios.filter((c) => SCENARIOS.some(([k]) => k === c));
+
   html += `<div class="bloc">
     <h2 class="titre">Scenarios a tester</h2>
     <p class="faible" style="margin:0 0 7px">
-      Chaque scenario se mesure sur les memes modeles, avec les memes leviers.
-      Decoche ce que tu ne veux pas mesurer — le banc va plus vite.</p>
+      Dans l'ordre du pipeline. Decoche ce que tu ne veux pas mesurer —
+      le banc va plus vite.</p>
     <div class="rangee" style="margin-bottom:7px">
       <button class="btn mini" id="b-sc-tous">Tous</button>
       <button class="btn mini" id="b-sc-aucun">Aucun</button>
     </div>
-    ${[["traduction", "Traduction", "le texte source vers le français"],
-       ["glossaire", "Glossaire", "termes, traduction, définition"],
-       ["contexte", "Contexte", "le résumé que lit le pipeline"],
-       ["polices", "Polices", "les polices de remplacement à chercher"],
-       ["charge", "Charge", "combien d'agents en même temps"]]
-      .map(([cle, nom, aide]) => `<label class="case" style="display:block">
-        <input type="checkbox" data-sc="${cle}" checked>
-        <span><b>${nom}</b> <span class="faible">— ${aide}</span></span>
-      </label>`).join("")}
-    ${S.bancScenarios && S.bancScenarios.includes("charge") ? "" : ""}
+    ${SCENARIOS.map(([cle, nom, aide]) => `<label class="case" style="display:block">
+      <input type="checkbox" data-sc="${cle}" ${scens.includes(cle) ? "checked" : ""}>
+      <span><b>${nom}</b> <span class="faible">— ${aide}</span></span>
+    </label>`).join("")}
   </div>`;
 
   // ---------- les modeles ----------
   // seulement les modeles gratuits : ce sont les seuls qui nous interessent,
   // et 425 modeles a parcourir pour en trouver 3 n'aide personne
+  // on ne preselectionne qu'une fois. Si tu decoches TOUT, il faut que ca
+  // reste decoche : sinon decocher le dernier modele le recoche, ce qui rend
+  // impossible d'en selectionner aucun.
+  if (!CHOIX.modelesInit) {
+    CHOIX.modelesInit = true;
+    CHOIX.modeles = S.options?.model ? [S.options.model]
+      : ["stealth/space-bunny-alpha"];
+  }
+  const choisis = CHOIX.modeles || [];
   const libres = (cat.modeles || []).filter((m) => m.gratuit);
   html += `<div class="bloc">
     <h2 class="titre">Modeles gratuits — ${libres.length}</h2>
@@ -1830,7 +1864,7 @@ async function vueBanc(v, colTri) {
     <div class="scroll" style="max-height:230px;columns:2" id="b-liste">
       ${libres.map((m) => `<label class="case" data-nom="${echapper(m.id.toLowerCase())}">
         <input type="checkbox" data-mod="${echapper(m.id)}"
-          ${m.id === "stealth/space-bunny-alpha" ? "checked" : ""}>
+          ${choisis.includes(m.id) ? "checked" : ""}>
         <span style="font-size:11.5px">${echapper(m.id)}
           ${m.gratuit ? '<span class="pastille ok">gratuit</span>' : ""}
           ${m.raisonnement_obligatoire ? `<span class="pastille">${m.efforts ? "raisonnement" : "raisonnement fixe"}</span>` : ""}</span>
@@ -1919,48 +1953,61 @@ async function vueBanc(v, colTri) {
   }
 
   // ---------- la charge ----------
-        // Combien d'appels simultanes le modele encaisse-t-il ? C'est la question
-        // qu'on se pose avant de lancer 40 blocs de glossaire en parallele.
-        html += `<div class="bloc">
-          <h2 class="titre">Charge — combien d'agents en meme temps</h2>
-          <p class="faible" style="margin:0 0 8px">
-            Fait tourner des blocs de glossaire en nombre croissant, et mesure ce que
-            ca rapporte vraiment. Le gain compare au sequentiel : s'il reste a 1x, on
-            se dispute le service au lieu de gagner du temps. Le test s'arrete au
-            premier palier qui perd un appel.</p>
-          <div class="rangee" style="margin-bottom:8px">
-            <label class="rangee"><span class="faible">Paliers</span>
-              <input type="text" id="c-niveaux" value="1, 2, 3, 4, 6, 8, 12, 16, 24"
-                     style="width:150px"></label>
-            <button class="btn acc" id="c-lancer" ${enCours ? "disabled" : ""}>
-              ${enCours ? "Mesure en cours…" : "Mesurer la charge"}</button>
-          </div>
-          ${charge.niveaux && charge.niveaux.length ? `
-            <div class="faible" style="margin:0 0 6px">
-              ${echapper(charge.modele || "")} — plafond mesure :
-              <b style="color:var(--ok)">${charge.tenu || 0} agents</b> sans perte
-              ${charge.maj ? ` (${echapper(charge.maj)})` : ""}</div>
-            <div class="scroll-tab"><table>
-              <tr><th>Agents</th><th>Blocs</th><th>Reussis</th><th>Temps du lot</th>
-                  <th>Gain</th><th>Latence min/moy/max</th><th>Tronques</th><th>Termes</th></tr>
-              ${charge.niveaux.map((n) => `<tr>
-                <td>${n.n_agents}</td>
-                <td class="faible">${n.blocs}</td>
-                <td class="${n.nb_ok === n.blocs ? "" : "alerte"}">${echapper(n.reussis)}</td>
-                <td>${n.total_s}s</td>
-                <td${n.gain >= 2 ? ' style="color:var(--ok)"' : ""}>${n.gain ?? "—"}x</td>
-                <td class="faible">${n.lat_min ?? "—"} / ${n.lat_moy ?? "—"} / ${n.lat_max ?? "—"}s</td>
-                <td class="${n.tronques ? "alerte" : "faible"}">${n.tronques}</td>
-                <td class="faible">${n.termes}</td>
-              </tr>`).join("")}
-            </table></div>
-            ${charge.niveaux.some((n) => n.erreurs && n.erreurs.length) ? `
-              <div class="log" style="max-height:90px;margin-top:7px">${echapper(
-                [...new Set(charge.niveaux.flatMap((n) => n.erreurs || []))].join("\n"))}</div>` : ""}
-          ` : `<p class="vide">Pas encore de mesure de charge.</p>`}
-        </div>`;
+  // Un tableau par modele mesure : c'est la charge qui dit combien d'agents
+  // chacun encaisse, donc c'est une comparaison, pas une mesure unique.
+  const cr = charge.modeles || [];
+  html += `<div class="bloc">
+    <h2 class="titre">Charge — combien d'agents en meme temps</h2>
+    <p class="faible" style="margin:0 0 7px">
+      Mesure chaque modele coche, du plus petit palier au plus grand. Le test
+      s'arrete au premier palier qui perd un appel : au-dela, on se dispute
+      le service. Le gain compare au sequentiel.</p>
+    <div class="rangee" style="margin-bottom:8px">
+      <label class="rangee"><span class="faible">Paliers</span>
+        <input type="text" id="c-niveaux" value="${CHOIX.paliers || "1, 2, 3, 4, 6, 8, 12, 16, 24"}"
+               style="width:170px"></label>
+      <button class="btn acc" id="c-lancer" ${enCours ? "disabled" : ""}>
+        ${enCours ? "Mesure en cours…" : "Mesurer la charge"}</button>
+    </div>
+    ${cr.length ? cr.map((x) => `
+      <div style="margin-bottom:11px">
+        <div style="font-size:11.5px;margin-bottom:3px">
+          <b>${echapper(x.modele)}</b> — plafond
+          <b style="color:var(--ok)">${x.tenu} agents</b> sans perte
+          <span class="faible">(mesuré ${echapper(x.maj || "")})</span></div>
+        <div class="scroll-tab"><table>
+          <tr><th>Agents</th><th>Blocs</th><th>Reussis</th><th>Temps</th>
+              <th>Gain</th><th>Tronques</th><th>Termes</th></tr>
+          ${(x.niveaux || []).map((n) => `<tr>
+            <td>${n.n_agents}</td>
+            <td class="faible">${n.blocs}</td>
+            <td class="${n.nb_ok === n.blocs ? "" : "alerte"}">${echapper(n.reussis)}</td>
+            <td>${n.total_s}s</td>
+            <td${n.gain >= 2 ? ' style="color:var(--ok)"' : ""}>${n.gain ?? "—"}x</td>
+            <td class="${n.tronques ? "alerte" : "faible"}">${n.tronques}</td>
+            <td class="faible">${n.termes}</td>
+          </tr>`).join("")}
+        </table></div>
+      </div>`).join("")
+    : `<p class="vide">Pas encore de mesure de charge.</p>`}
+  </div>`;
 
-    v.innerHTML = html;
+  v.innerHTML = html;
+
+  // les valeurs choisies, remises apres le rendu : un <select> n'a sa valeur
+  // qu'une fois dans le DOM, on ne peut pas la mettre dans le template
+  (() => {
+    const e = v.querySelector("#b-effort");
+    if (e && CHOIX.effort && [...e.options].some((o) => o.value === CHOIX.effort)) {
+      e.value = CHOIX.effort;
+    }
+    v.querySelector("#b-effort")?.addEventListener("change", (ev) => {
+      CHOIX.effort = ev.target.value;
+    });
+    v.querySelector("#b-raison")?.addEventListener("change", (ev) => {
+      CHOIX.raisonnement = ev.target.value === "1";
+    });
+  })();
 
   // le tri : on re-rend avec la nouvelle colonne
   v.querySelectorAll("[data-tri]").forEach((th) =>
@@ -1978,16 +2025,26 @@ async function vueBanc(v, colTri) {
     stop: v.querySelector("#b-stopseq")?.value || null,
     repetitions: Number(v.querySelector("#b-repet")?.value) || 3,
     include_reasoning: !!v.querySelector("#b-reasoning")?.checked,
+    raisonnement: v.querySelector("#b-raison")?.value !== "0",
     timeout: Number(v.querySelector("#b-timeout")?.value) || 180,
   });
 
   // ---------- les scenarios choisis ----------
   const _scenariosChoisis = () =>
     [...v.querySelectorAll("[data-sc]:checked")].map((c) => c.dataset.sc);
-  v.querySelector("#b-sc-tous")?.addEventListener("click", () =>
-    v.querySelectorAll("[data-sc]").forEach((c) => (c.checked = true)));
-  v.querySelector("#b-sc-aucun")?.addEventListener("click", () =>
-    v.querySelectorAll("[data-sc]").forEach((c) => (c.checked = false)));
+  const _scChange = () => {
+    CHOIX.scenarios = [...v.querySelectorAll("[data-sc]:checked")].map((c) => c.dataset.sc);
+  };
+  v.querySelectorAll("[data-sc]").forEach((c) =>
+    c.addEventListener("change", _scChange));
+  v.querySelector("#b-sc-tous")?.addEventListener("click", () => {
+    v.querySelectorAll("[data-sc]").forEach((c) => (c.checked = true));
+    _scChange(); vueBanc(v);
+  });
+  v.querySelector("#b-sc-aucun")?.addEventListener("click", () => {
+    v.querySelectorAll("[data-sc]").forEach((c) => (c.checked = false));
+    _scChange(); vueBanc(v);
+  });
   // ---------- fin scenarios ----------
   
   // ---------- le bouton de charge ----------
@@ -2000,12 +2057,12 @@ async function vueBanc(v, colTri) {
     if (!niveaux.length) return notif("Aucun palier valide", true);
     try {
       await api("/banc/charge/lancer", { method: "POST", body: JSON.stringify({
-        modeles: [modeles[0]],   // la charge se mesure sur un modele a la fois
+        modeles,   // la charge se mesure sur TOUS les modeles coches
         niveaux,
         projet: v.querySelector("#b-source")?.value || "",
         ..._leviersUI(),
       }) });
-      notif(`Charge : ${modeles[0]}`);
+      notif(`Charge : ${modeles.length} modèle(s)`);
       vueBanc(v);
     } catch (e) { notif(e.message, true); }
   });
@@ -2046,10 +2103,13 @@ async function vueBanc(v, colTri) {
       l.style.display = l.dataset.nom.includes(q) ? "" : "none";
     });
   });
-  // cocher un modele met a jour la fiche ET le comparatif immediatement :
-  // tu veux voir le resultat en cochant, pas en redemarrant
+  // cocher un modele : on enregistre le choix puis on re-rend. Le choix est
+  // dans CHOIX, pas dans le DOM — sinon le re-rendu l'effacerait.
   v.querySelectorAll("[data-mod]").forEach((c) =>
-    c.addEventListener("change", () => vueBanc(v)));
+    c.addEventListener("change", () => {
+      CHOIX.modeles = [...v.querySelectorAll("[data-mod]:checked")].map((x) => x.dataset.mod);
+      vueBanc(v);
+    }));
 }
 
 // --- log ---
