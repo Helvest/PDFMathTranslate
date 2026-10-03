@@ -29,6 +29,65 @@ ROUTES_ATTENDUES = [
 ]
 
 
+def test_leviers_par_modele(echecs: list) -> None:
+    """Chaque modele doit recevoir SON jeu de leviers, pas celui d'un autre.
+
+    Bug reel : la detection cherchait "effort" dans le payload, or cette cle est
+    presente a l'interieur meme d'un dict par modele. Un seul modele etait donc
+    traite, et tous les autres recisaient ses valeurs par defaut.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import serveur
+    except Exception as e:  # noqa: BLE001
+        echecs.append(f"serveur non importable : {e}")
+        return
+
+    def _verifie(cond, message):
+        if not cond:
+            echecs.append(message)
+
+    class _Banc:
+        @staticmethod
+        def effort_serieux(m):
+            return "low"
+
+    a = {"id": "modele/a", "efforts": ["low"], "raisonnement_obligatoire": True}
+    b = {"id": "modele/b", "efforts": ["high"], "raisonnement_obligatoire": True}
+
+    # le cas de l'interface : {"leviers": {id: jeu}}
+    payload = {"leviers": {
+        "modele/a": {"effort": "low", "max_tokens": 16000, "temperature": 0,
+                     "repetitions": 2, "top_p": 0.9, "seed": 42,
+                     "repetition_penalty": 1.05, "stop": "FIN",
+                     "include_reasoning": False, "raisonnement": True},
+        "modele/b": {"effort": "high", "max_tokens": 9000, "temperature": 0.7,
+                     "repetitions": 1, "top_p": 0.5, "seed": 7,
+                     "repetition_penalty": 1.2, "stop": "###",
+                     "include_reasoning": True, "raisonnement": False},
+    }}
+    r = serveur._leviers_par_modele(payload, [a, b], _Banc)
+
+    _verifie(set(r) == {"modele/a", "modele/b"}, f"cles attendues : {set(r)}")
+    la, lb = r["modele/a"], r["modele/b"]
+
+    _verifie(la["max_tokens"] == 16000 and lb["max_tokens"] == 9000,
+             f"budgets de tokens melanges : {la['max_tokens']} / {lb['max_tokens']}")
+    _verifie(la["temperature"] == 0 and lb["temperature"] == 0.7,
+             f"temperatures melangees : {la['temperature']} / {lb['temperature']}")
+    _verifie(lb["effort"] == "high", f"effort du modele b : {lb['effort']}")
+    _verifie(lb.get("raisonnement") is False,
+             "raisonnement=False doit etre transmis")
+    _verifie(lb["include_reasoning"] is True, "include_reasoning=True perdu")
+
+    # et un seul jeu, a plat : applique a tous
+    plat = serveur._leviers_par_modele(
+        {"effort": "low", "max_tokens": 8000, "temperature": 0.2},
+        [a, b], _Banc)
+    _verifie(plat["modele/a"]["max_tokens"] == plat["modele/b"]["max_tokens"] == 8000,
+             "un jeu unique doit s'appliquer a tous")
+
+
 def main() -> int:
     echecs: list[str] = []
 
@@ -60,6 +119,9 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         echecs.append(f"_liste_projets a leve : {type(e).__name__}: {e}")
         projets = []
+
+    # les leviers sont bien distincts par modele
+    test_leviers_par_modele(echecs)
 
     if echecs:
         print("ECHECS :")

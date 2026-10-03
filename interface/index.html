@@ -1886,16 +1886,16 @@ async function vueBanc(v, colTri) {
           <p class="faible" style="margin:0">
             Ce modele ne raisonne pas : ni effort, ni raisonnement, ni
             include_reasoning. Seul <code>temperature</code> s'applique.</p>`}
-        <label class="rangee"><span class="faible">Tokens max</span>
+        <label class="rangee" title="${aide.tokens}"><span class="faible">Tokens max <span class="pastille">?</span></span>
           <input type="number" id="b-maxtok" value="${CHOIX.max_tokens || cat.leviers.max_tokens || 16000}"
                  min="1000" max="200000" step="1000" style="width:100px"></label>
-        <label class="rangee"><span class="faible">Temperature</span>
+        <label class="rangee" title="${aide.temperature}"><span class="faible">Temperature <span class="pastille">?</span></span>
           <input type="number" id="b-temp" value="${CHOIX.temperature ?? 0}"
                  min="0" max="2" step="0.1" style="width:74px"></label>
-        <label class="rangee"><span class="faible">Repetitions</span>
+        <label class="rangee" title="${aide.repetitions}"><span class="faible">Repetitions <span class="pastille">?</span></span>
           <input type="number" id="b-repet" value="${CHOIX.repetitions || 3}"
                  min="1" max="10" step="1" style="width:64px"></label>
-        <label class="rangee"><span class="faible">Timeout</span>
+        <label class="rangee" title="${aide.timeout}"><span class="faible">Timeout <span class="pastille">?</span></span>
           <input type="number" id="b-timeout" value="${CHOIX.timeout || 180}"
                  min="30" max="900" step="30" style="width:76px"></label>
       </div>
@@ -1903,16 +1903,16 @@ async function vueBanc(v, colTri) {
       <details style="margin-top:9px">
         <summary class="faible" style="cursor:pointer">Leviers avances</summary>
         <div class="rangee" style="margin-top:7px">
-          <label class="rangee"><span class="faible">top_p</span>
+          <label class="rangee" title="${aide.top_p}"><span class="faible">top_p <span class="pastille">?</span></span>
             <input type="number" id="b-topp" placeholder="aucun" min="0" max="1" step="0.05"
                    style="width:84px"></label>
-          <label class="rangee"><span class="faible">seed</span>
+          <label class="rangee" title="${aide.seed}"><span class="faible">seed <span class="pastille">?</span></span>
             <input type="number" id="b-seed" placeholder="aucun" step="1"
                    style="width:84px"></label>
-          <label class="rangee"><span class="faible">repetition_penalty</span>
+          <label class="rangee" title="${aide.repetition_penalty}"><span class="faible">repetition_penalty <span class="pastille">?</span></span>
             <input type="number" id="b-rep" placeholder="aucun" min="0.5" max="2" step="0.05"
                    style="width:84px"></label>
-          <label class="rangee"><span class="faible">stop</span>
+          <label class="rangee" title="${aide.stop}"><span class="faible">stop <span class="pastille">?</span></span>
             <input type="text" id="b-stopseq" placeholder="aucun" style="width:130px"></label>
         </div>
       </details>

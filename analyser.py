@@ -1078,6 +1078,15 @@ def step_glossary(
         fusionnes = propositions
         print("    fusion sans reponse — on garde les propositions brutes")
 
+    # --- la casse, deterministement
+    # Le prompt de fusion le demande, mais un modele peut l'ignorer. Mesure
+    # sur un vrai glossaire : "Refrain" et "refrain" etaient deux entrees, et
+    # le mot etait remplace deux fois dans le meme paragraphe.
+    avant = len(fusionnes)
+    fusionnes = agents._fusionner_casse(fusionnes)
+    if len(fusionnes) != avant:
+        print(f"    {avant - len(fusionnes)} variante(s) de casse fusionnee(s)")
+
     # --- ecriture
     nb = 0
     for terme in fusionnes:

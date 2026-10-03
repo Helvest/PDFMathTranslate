@@ -23,6 +23,51 @@ def _fin(echecs: list[str]) -> int:
     return 0
 
 
+def test_fusionner_casse() -> None:
+    """Les variantes de casse d'un meme terme doivent fusionner.
+
+    Mesure sur un vrai glossaire : "Refrain" et "refrain" etaient deux entrees,
+    donc le mot etait remplace DEUX FOIS dans le meme paragraphe.
+    """
+    f = agents._fusionner_casse
+
+    # le cas reel
+    r = f([{"src": "Refrain", "tgt": "Refrain", "definition": "court"},
+           {"src": "refrain", "tgt": "refrain", "definition": "melodie"}])
+    _verifie(len(r) == 1, f"deux variantes -> {len(r)} entrees")
+    _verifique = _verifie
+    _verifie(r[0]["src"] == "Refrain",
+             f"la forme majuscule doit gagner : {r[0]['src']}")
+
+    # un terme marque en majuscules garde sa forme
+    r2 = f([{"src": "BARRACKS", "tgt": "CASERNES", "definition": ""},
+            {"src": "barracks", "tgt": "casernes", "definition": ""}])
+    _verifie(r2[0]["src"] == "BARRACKS",
+             f"une marque en majuscules doit etre preservee : {r2[0]['src']}")
+
+    # des termes differents ne doivent PAS fusionner
+    r3 = f([{"src": "Slip", "tgt": "Slip", "definition": ""},
+            {"src": "Refrain", "tgt": "Refrain", "definition": ""}])
+    _verifie(len(r3) == 2, f"deux termes distincts -> {len(r3)}")
+
+    # une source vide est jetee : elle ne correspond a rien
+    r4 = f([{"src": "", "tgt": "x", "definition": ""},
+            {"src": "  ", "tgt": "y", "definition": ""}])
+    _verifie(r4 == [], f"des sources vides doivent etre jetees : {r4}")
+
+    # la plus longue definition est conservee
+    r5 = f([{"src": "Slip", "tgt": "Slip", "definition": "court"},
+            {"src": "SLIP", "tgt": "SLIP",
+             "definition": "force magique dont les chants alimentent les sorts"}])
+    _verifie(len(r5[0]["definition"]) > 20,
+             f"la definition la plus riche doit gagner : {r5[0]['definition']}")
+
+    # la liste doit rester stable et complete
+    r6 = f([{"src": "a", "tgt": "a"}, {"src": "A", "tgt": "A"},
+            {"src": "b", "tgt": "b"}])
+    _verifie(len(r6) == 2, f"3 termes dont 1 doublon -> {len(r6)}")
+
+
 def main() -> int:
     echecs: list[str] = []
 

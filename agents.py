@@ -98,6 +98,11 @@ Regles de decision, dans l'ordre :
    coherente avec le ton du jeu, et signale-le dans la definition.
 5. Si plusieurs agents ont compris le terme differemment, garde la definition
    la plus informative, et signale le doute.
+6. CASSE : "Refrain" et "refrain" sont le MEME terme. Ne produis qu'une seule
+   entree par terme, insensible a la casse. Si le mot apparait en majuscule
+   dans le texte source (titre de section, MARQUEUR), garde cette forme ; sinon
+   garde la forme la plus frequente. Deux entrees pour un meme mot, c'est une
+   traduction qui recoit le mot deux fois dans le meme paragraphe.
 
 Propositions :
 ---json---
@@ -117,6 +122,49 @@ Consignes de l'utilisateur :
 Reponds UNIQUEMENT par un tableau JSON :
 [{{"src": "terme", "tgt": "traduction", "definition": "definition", "source": "agent|fusion", "doute": "vide ou raison du doute"}}]
 """
+
+
+def _fusionner_casse(termes: list[dict]) -> list[dict]:
+    """Regroupe les variantes de casse d'un meme terme.
+
+    Le prompt de fusion le demande, mais un modele peut ne pas le faire — et on
+    s'est retrouve avec "Refrain" et "refrain" dans le glossaire, donc le mot
+    remplace deux fois dans le meme paragraphe, avec deux traductions
+    potentiellement differentes. Ce garde-fou est deterministe : il ne
+    depend pas de la bonne volonte du modele.
+
+    On garde la forme la plus frequente, et celle qui porte un marquage
+    (majuscules) n'est ecrasee que si l'autre est strictement plus frequente.
+    """
+    groupes: dict[str, list[dict]] = {}
+    for t in termes:
+        src = (t.get("src") or "").strip()
+        if not src:
+            continue
+        groupes.setdefault(src.lower(), []).append(t)
+
+    out: list[dict] = []
+    for _, variantes in groupes.items():
+        if len(variantes) == 1:
+            out.append(variantes[0])
+            continue
+
+        # la forme qu'on garde : la plus frequente ; a egalite, celle qui
+        # porte un marquage (majuscule au dela de 2 caracteres)
+        def _score(d):
+            marquee = sum(1 for c in d["src"] if c.isupper())
+            explicite = d["src"].isupper() and len(d["src"]) > 2
+            return (1 if explicite else 0, marquee, -variantes.index(d))
+
+        gagnante = max(variantes, key=_score)
+        # les definitions se completent plutot que de se remplacer
+        defs = [d.get("definition", "") for d in variantes if d.get("definition")]
+        if defs:
+            gagnante = dict(gagnante)
+            gagnante["definition"] = max(defs, key=len)
+        out.append(gagnante)
+
+    return out
 
 
 def _bloc(consignes: str = "", lot: str = "", document: str = "",

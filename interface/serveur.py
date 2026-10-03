@@ -1380,22 +1380,38 @@ def _leviers_par_modele(payload: dict, modeles: list[dict], banc) -> dict:
     """Un jeu de leviers par modele.
 
     Tu peux vouloir space-bunny en effort "low" et ling en "high" : ce sont
-    deux choix independants. Si l'interface n'envoie qu'un seul jeu, il
-    s'applique a tous — c'est le comportement par defaut.
-    """
-    brut = payload.get("leviers") or payload
-    if not isinstance( brut, dict) or not any(
-            k in brut for k in ("effort", "max_tokens", "temperature")):
-        # pas de dict par modele : un seul jeu pour tous
-        return {m["id"]: _leviers(brut, m, banc) for m in modeles}
+    deux choix independants. Un seul jeu, s'il n'y a pas de dict par modele,
+    s'applique a tous.
 
-    par_modele = {}
-    for m in modeles:
-        son_jeu = brut.get(m["id"])
-        par_modele[m["id"]] = (
-            _leviers(son_jeu, m, banc) if isinstance(son_jeu, dict)
-            else _leviers(brut, m, banc))
-    return par_modele
+    La detection importait : on testait si le payload contenait "effort", ce
+    qui est vrai meme a l'interieur d'un dict par modele. Un seul modele etait
+    alors traite, et les autres rec TROUVAIT par defaut — on croyait regler
+    deux modeles differemment alors qu'on reglait le premier pour tous.
+    """
+    if "leviers" in payload:
+        par_modele = payload["leviers"]
+    else:
+        # l'ancien format : un seul jeu de reglage, a plat
+        par_modele = None
+
+    def _connus(jeu):
+        """Ce jeu porte-t-il des reglage, ou est-ce la structure par modele ?"""
+        return isinstance(jeu, dict) and any(
+            k in jeu for k in ("effort", "max_tokens", "temperature",
+                               "repetitions", "top_p", "seed"))
+
+    if isinstance(par_modele, dict) and not _connus(par_modele):
+        # dict {modele: jeu} : le cas attendu
+        return {
+            m["id"]: (_leviers(par_modele[m["id"]], m, banc)
+                      if isinstance(par_modele.get(m["id"]), dict)
+                      else _leviers(par_modele, m, banc))
+            for m in modeles
+        }
+
+    # un seul jeu pour tout le monde
+    base = par_modele if isinstance(par_modele, dict) else payload
+    return {m["id"]: _leviers(base, m, banc) for m in modeles}
 
 
 def _leviers(payload: dict, modele: dict, banc) -> dict:
