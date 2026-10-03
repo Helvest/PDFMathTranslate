@@ -17,7 +17,8 @@ Traduction AI V2/              <- la racine, hors du dépôt git
 │   ├── registre.py          présence, mode, réassociation, purge
 │   ├── donnees.py           glossaire, polices, orphelins, export CSV
 │   ├── analyser.py           passe d'analyse : contexte, polices, glossaire
-│   ├── bench.py              test de performance des modèles
+│   ├── banc.py               Banc : mesure des modèles et des leviers
+│   ├── test_suite.py         lance les 9 tests depuis l'interface
 │   ├── traduire.sh           traduction (backend v2)
 │   ├── polices.py            charge le mapping de polices pour BabelDOC
 │   ├── catalogue_polices.py  catalogue des polices (3 sources)
@@ -240,24 +241,37 @@ vient du contenu.
 | `PDF2ZH_QPS` / `PDF2ZH_POOL` | débit / parallélisme |
 | `PDF2ZH_NO_FONTS` | désactive le patch des polices |
 
-**Modèles** : mesurés par `bench.py`, pas choisis à l'œil. Le classement bouge
-d'un test à l'autre, les quotas gratuits étant variables — **relire le dernier
-résultat** dans `Global/bench/resultats.json` ou l'onglet Bench.
+**Modèles** : mesurés par `banc.py`, pas choisis à l'œil — onglet **Banc**
+dans l'interface. Ne jamais conclure sur un modèle sans y regarder d'abord.
 
-| Modèle | Réussis | Latence |
+`space-bunny-alpha` impose le raisonnement (`reasoning.mandatory`) avec
+`default_effort = max`. Un appel sans effort explicite déclenche donc la
+**réflexion maximale** : 271 s et un JSON tronqué, au lieu de 9 s et 28 termes.
+
+| Réglage | Latence | Termes |
 |---|---|---|
-| `inclusionai/ling-3.0-flash-sante:free` | 6/6 | **1,3 s** |
-| `poolside/laguna-s-2.1:free` | 6/6 | 2,8 s |
-| `meituan/longcat-2.5-preview:free` | 6/6 | 3,6 s |
-| `poolside/laguna-xs-2.1:free` | 6/6 | 4,5 s |
+| `effort=low`, `max_tokens=16000` | **9 s** | 28 |
+| `effort=medium` | 34 s | 22 |
+| `effort=high` | 49 s | **0** |
+| `effort=max` | 46 s | **0** |
 
-Le modèle d'extraction de glossaire doit supporter
-`response_format: json_object` — `ling-sante` renvoie 400.
+Deux défauts distincts se cachent là :
+- la **latence** vient de l'effort ;
+- les **0 terme** viennent de `max_tokens=4000` : le raisonnement consomme
+  tout le budget et coupe le JSON. Plus on réfléchit, moins il reste de place.
 
-Le proxy annonce **7 modèles gratuits dont 3 morts** (2× 404, 1× 400). Ne pas
-faire confiance à sa liste : vérifier par un test.
+Deux choses à savoir sur le proxy :
+- il rend parfois une **réponse vide** avec `finish_reason=stop`, sans erreur
+  et avec les tokens rapportés — mesuré à 1 appel sur 8. `banc.appeler()`
+  réessaie une fois ; les vraies erreurs (429, 400) ne sont pas réessayées.
+- il accepte 27 paramètres. `banc._construire()` n'envoie que ceux que
+  l'utilisateur a réglés **et** que le modèle supporte : un paramètre non
+  supporté fait refuser la requête entière.
 
----
+`/v1/models` est la source de vérité : contexte, `supported_parameters`,
+`reasoning.supported_efforts`, prix, expiration. Le catalogue garde le modèle
+complet sous `brut` — ne pas le filtrer, un champ jeté est une information
+perdue.
 
 ## 9. Ajouter une étape
 
@@ -309,12 +323,27 @@ savoir où elle en est.
 | une étape renvoie 0 | tous les appels ont échoué ; regarder le log de l'étape |
 | le port 8756 est occupé | un ancien serveur tourne ; `netstat -ano | grep 8756` puis `taskkill /F /PID` |
 
-**Six tests, à lancer avant de conclure.** Ils tournent en une seconde :
+**Neuf tests, à lancer avant de conclure.** Ils tournent en ~4 secondes et
+se lancent depuis l'interface, onglet **Tests du code** (bouton du panneau de
+gauche) :
 
 ```bash
-.venv/Scripts/python.exe test_base.py test_registre.py test_donnees.py test_export.py
-cd interface && ../.venv/Scripts/python.exe test_serveur.py test_api.py
+.venv/Scripts/python.exe test_suite.py          # liste ce qui est déclaré
 ```
+
+En ligne de commande, un par un, **avec `-I` et `cwd` sur le dossier du
+test** — sans quoi un `PYTHONPATH` hérité fait charger au `.venv` les paquets
+d'un autre environnement, et `interface/test_serveur.py` échoue sans raison :
+
+```bash
+.venv/Scripts/python.exe -I test_base.py        # test_registre, test_donnees,
+cd interface && ../.venv/Scripts/python.exe -I test_serveur.py   # test_export,
+                                                      # test_decoupe, test_agents, test_banc
+```
+
+Les tests sont **déclarés** dans `SUITE` (`test_suite.py`). Un `test_*.py`
+présent sur le disque mais absent de la déclaration est signalé comme
+`orphelin` : il existe, mais personne ne le lancera jamais d'ici.
 
 Ils vérifient le schéma, le registre, la logique d'orphelin, l'export, les
 routes et leurs refus. Ils ne remplacent pas l'exécution réelle : c'est

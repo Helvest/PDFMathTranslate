@@ -302,7 +302,9 @@
     </div>
     <div class="pliste" id="pliste"></div>
     <div class="pied" style="flex-direction:column">
-      <button class="btn plein" id="btn-banc"
+      <button class="btn plein" id="btn-tests"
+    title="Lancer les tests du code (schema, registre, agents, routes)">Tests du code</button>
+  <button class="btn plein" id="btn-banc"
         title="Mesurer les modeles sur nos 4 scenarios de production (global, hors projet)">Banc des modeles</button>
       <button class="btn plein acc" id="btn-creer">+ Creer un projet</button>
     </div>
@@ -719,11 +721,13 @@ function dessinerVue() {
   const v = $("#vue");
   // le bench est global : il s'affiche meme sans projet
   if (S.vue === "banc") { vueBanc(v); return; }
+  if (S.vue === "tests") { vueTests(v); return; }
   if (!S.actif) {
     v.innerHTML = '<p class="vide">Aucun projet. Cree-en un avec le bouton en bas a droite.</p>';
     return;
   }
   if (S.vue === "banc") { vueBanc(v); return; }
+  if (S.vue === "tests") { vueTests(v); return; }
   ({
     config: vueConfig, options: vueOptions, contexte: vueContexte,
     polices: vuePolices, glossaire: vueGlossaire, pdfs: vuePdfs, log: vueLog,
@@ -1594,6 +1598,93 @@ function comparer(nomSource, trad, v) {
 }
 
 // --- bench (global, hors projet) ---
+async function vueTests(v) {
+  let d;
+  try { d = await api("/tests"); }
+  catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
+
+  S.tests = d;
+  const res = d.resultat;
+  const etat = d.etat || {};
+  const enCours = etat.etat === "en_cours";
+  const ko = res ? res.tests.filter((t) => !t.ok) : [];
+
+  let html = `<div class="bloc">
+    <h2 class="titre">Tests du projet</h2>
+    <p class="faible" style="margin:0 0 9px">
+      Le <b>Banc</b> mesure les modeles ; ces tests verifient le <b>code</b> :
+      schema, registre, export, agents, routes. Chaque test a son propre
+      processus — un test qui plante n'arrete pas les autres.</p>
+    <div class="rangee" style="margin-bottom:9px">
+      <button class="btn acc" id="t-lancer" ${enCours ? "disabled" : ""}>
+        ${enCours ? "Tests en cours…" : "Lancer tous les tests"}</button>
+      ${enCours ? '<button class="btn danger" id="t-stop">Abandonner</button>' : ""}
+      <button class="btn" id="t-rafraichir">Rafraichir</button>
+      ${res ? `<span class="${res.tout_passe ? "" : "alerte"}">
+        ${res.reussis}/${res.total} reussis${res.maj ? ` — ${echapper(res.maj)}` : ""}
+      </span>` : ""}
+    </div>
+    ${etat.log ? `<div class="log" style="max-height:90px">${echapper(etat.log)}</div>` : ""}
+    ${d.orphelins && d.orphelins.length ? `<p class="vide" style="margin-top:7px">
+      ${d.orphelins.length} fichier(s) test_*.py non declares :
+      <b>${d.orphelins.map(echapper).join(", ")}</b> — ils existent mais ne se
+      lancent pas d'ici.</p>` : ""}
+  </div>`;
+
+  // --- la liste, avec le resultat de chaque test
+  html += `<div class="bloc">
+    <h2 class="titre">Ce qui est teste — ${d.tests.length}</h2>
+    <div class="scroll-tab"><table>
+      <tr><th></th><th>Test</th><th>Ce qu'il garantit</th><th>Fichier</th><th>Resultat</th></tr>
+      ${d.tests.map((t) => {
+        const r = res ? res.tests.find((x) => x.nom === t.nom) : null;
+        const marque = !t.existe ? "MANQUANT"
+          : !r ? "—"
+          : r.ok ? '<span class="pastille ok">ok</span>'
+          : '<span class="pastille warn">echec</span>';
+        const duree = r && r.duree_s !== undefined ? ` ${r.duree_s}s` : "";
+        return `<tr>
+          <td><input type="checkbox" data-test="${echapper(t.nom)}" checked></td>
+          <td>${echapper(t.nom)}</td>
+          <td class="faible">${echapper(t.garantit)}</td>
+          <td class="faible" style="font-size:10.5px">${echapper(t.fichier)}${duree}</td>
+          <td>${marque}</td>
+        </tr>`;
+      }).join("")}
+    </table></div>
+  </div>`;
+
+  // --- les sorties des echecs : sans elles, "echec" ne dit rien
+  if (ko.length) {
+    html += `<div class="bloc">
+      <h2 class="titre">Sorties des echecs — ${ko.length}</h2>
+      ${ko.map((t) => `<div style="margin-bottom:9px">
+        <div class="faible" style="margin-bottom:3px"><b>${echapper(t.nom)}</b>
+          ${t.code !== null && t.code !== undefined ? `— code ${t.code}` : ""}
+          ${t.erreur ? `— ${echapper(t.erreur)}` : ""}</div>
+        <div class="log" style="max-height:150px">${
+          echapper((t.sortie || []).join("\n"))}</div>
+      </div>`).join("")}
+    </div>`;
+  }
+
+  v.innerHTML = html;
+
+  const bl = v.querySelector("#t-lancer");
+  if (bl) bl.addEventListener("click", async () => {
+    const noms = [...v.querySelectorAll("[data-test]:checked")].map((c) => c.dataset.test);
+    if (!noms.length) return notif("Coche au moins un test", true);
+    try {
+      await api("/tests/lancer", { method: "POST", body: JSON.stringify({ tests: noms }) });
+      notif(`${noms.length} test(s) lance(s)`);
+      vueTests(v);
+    } catch (e) { notif(e.message, true); }
+  });
+  v.querySelector("#t-rafraichir")?.addEventListener("click", () => vueTests(v));
+  v.querySelector("#t-stop")?.addEventListener("click", () => vueTests(v));
+}
+
+// ---------------------------------------------------------------- banc
 async function vueBanc(v) {
   let d;
   try { d = await api("/banc/resultats"); }
@@ -1971,7 +2062,14 @@ $("#onglets").addEventListener("click", (ev) => {
   dessinerVue();
 });
 
-// Le bench n'est pas un projet : on decoche les onglets pendant qu'on est dedans.
+// Le banc et les tests ne sont pas un projet : on decoche les onglets
+// pendant qu'on est dedans.
+$("#btn-tests").addEventListener("click", () => {
+  S.vue = "tests";
+  document.querySelectorAll(".onglet").forEach((o) => o.classList.remove("on"));
+  $("#projet-titre").textContent = "";
+  dessinerVue();
+});
 $("#btn-banc").addEventListener("click", () => {
   S.vue = "banc";
   document.querySelectorAll(".onglet").forEach((o) => o.classList.remove("on"));
