@@ -60,8 +60,14 @@ LEVIERS_REGLABLES = ("reasoning", "effort", "max_tokens", "temperature")
 def catalogue() -> list[dict]:
     """Tout ce que le proxy dit des modeles, tel quel.
 
-    On ne filtre pas sur ":free" : le choix du modele se fait dans l'interface,
-    avec les metadonnees sous les yeux.
+    Les champs.rename(s) servent a l'affichage ; le modele complet est garde
+    dans "brut", intact. La raison : /v1/models evolves, et un jour il y aura un
+    champ qu'on n'avait pas prevu. Plutot que de le perdre, on le garde et
+    l'interface l'affiche tel quel — on ne decide pas a la place de
+    l'utilisateur de ce qui est utile.
+
+    On ne filtre pas sur ":free" : le choix se fait dans l'interface, avec les
+    metadonnees sous les yeux.
     """
     req = urllib.request.Request(f"{PROXY}/models",
                                  headers={"Authorization": f"Bearer {CLE}"})
@@ -75,13 +81,14 @@ def catalogue() -> list[dict]:
     for m in data.get("data", []):
         r = m.get("reasoning") or {}
         out.append({
+            # ce que l'interface affiche
             "id": m.get("id", ""),
             "nom": m.get("name", ""),
             "description": (m.get("description") or "").strip(),
             "contexte": m.get("context_length"),
             "max_completion": (m.get("top_provider") or {}).get("max_completion_tokens"),
             "parametres": m.get("supported_parameters") or [],
-            "modalites": (m.get("architecture") or {}).get("input_modalities") or [],
+            "modalites": (m.get("architecture") or {}).get("input_modalites") or [],
             "raisonnement_obligatoire": bool(r.get("mandatory")),
             "efforts": r.get("supported_efforts") or [],
             "effort_defaut": r.get("default_effort"),
@@ -89,6 +96,9 @@ def catalogue() -> list[dict]:
             "expire": m.get("expiration_date"),
             "modere": bool((m.get("architecture") or {}).get("is_moderated")),
             "per_request": m.get("per_request_limits"),
+            # tout le reste, intact : aliases, canonical_slug, knowledge_cutoff,
+            # default_parameters, pricing complet, links, supported_voices...
+            "brut": m,
         })
     return out
 

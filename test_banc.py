@@ -61,6 +61,58 @@ def test_catalogue() -> None:
 
 # ---------------------------------------------------------------- leviers
 
+def test_catalogue_complet() -> None:
+    """Aucun champ du proxy ne doit disparaitre.
+
+    On avait perdu 17 champs sur 19 (aliases, canonical_slug,
+    knowledge_cutoff, default_parameters, pricing complet...). Ils sont des
+    fois de moins pour comparer un modele, et le jour ou /v1/models ajoute un
+    champ, on ne doit pas avoir a modifier le code pour le voir.
+    """
+    import json as _json
+    import urllib.request as _u
+
+    req = _u.Request(banc.PROXY + "/models",
+                     headers={"Authorization": f"Bearer {banc.CLE}"})
+    try:
+        with _u.urlopen(req, timeout=25) as r:
+            origine = _json.load(r).get("data", [])
+    except Exception as e:  # noqa: BLE001
+        print(f"  proxy injoignable ({e}) : completude non verifiee")
+        return
+
+    if not origine:
+        return
+
+    cat = {m["id"]: m for m in banc.catalogue()}
+    _verifie(bool(cat), "catalogue vide")
+
+    manquants: list[str] = []
+    for m in origine:
+        entree = cat.get(m.get("id", ""))
+        if not entree:
+            manquants.append(f"{m.get('id')} absent du catalogue")
+            continue
+        for champ in m:
+            # tout doit se retrouver, soit dans un champ renomme, soit dans
+            # le modele complet conserve tel quel
+            if champ in entree:
+                continue
+            if champ in (entree.get("brut") or {}):
+                continue
+            manquants.append(f"{m['id']}.{champ}")
+
+    _verifie(not manquants,
+             f"{len(manquants)} champ(s) perdus : {', '.join(manquants[:8])}")
+
+    # et l'inverse : le brut ne doit rien inventer
+    for mid, m in cat.items():
+        if m.get("erreur"):
+            continue
+        _verifie(isinstance(m.get("brut"), dict) and m["brut"],
+                 f"{mid} : pas de modele complet conserve")
+
+
 def test_leviers() -> None:
     """Le corps de la requete doit porter exactement les leviers demandes."""
     modele = {
@@ -363,7 +415,7 @@ def test_leviers_api() -> None:
 
 
 def main() -> int:
-    for fn in (test_catalogue, test_leviers, test_qualite,
+    for fn in (test_catalogue, test_catalogue_complet, test_leviers, test_qualite,
                test_scenarios, test_resume, test_charge, test_leviers_api):
         fn()
 

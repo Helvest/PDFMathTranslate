@@ -272,6 +272,14 @@
     font-size: 11.5px; line-height: 1.75;
   }
   .fiche-modele > div > span.faible { display: inline-block; min-width: 128px; }
+  /* le JSON brut du modele : lisible, selectable, jamais coupe */
+  .brut-json {
+    margin: 6px 0 0; padding: 8px 10px; max-height: 320px; overflow: auto;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--muted, rgba(127,127,127,.07));
+    font-size: 10.5px; line-height: 1.5; white-space: pre-wrap;
+    word-break: break-word; user-select: text;
+  }
 </style>
 </head>
 <body>
@@ -1651,21 +1659,28 @@ async function vueBanc(v) {
                style="width:76px"></label>
     </div>
     ${choisi ? `<details style="margin-top:9px">
-      <summary class="faible" style="cursor:pointer">
-        Ce que le proxy dit de ${echapper(choisi.id)}</summary>
-      <div class="fiche-modele">
-        <div><span class="faible">Nom</span> ${echapper(choisi.nom || "—")}</div>
-        <div><span class="faible">Contexte</span> ${choisi.contexte ? (choisi.contexte / 1000).toFixed(0) + "k" : "—"}</div>
-        <div><span class="faible">Sortie max</span> ${choisi.max_completion || "—"}</div>
-        <div><span class="faible">Raisonnement</span> ${choisi.raisonnement_obligatoire ? "obligatoire" : "optionnel"}</div>
-        <div><span class="faible">Effort par defaut</span> ${echapper(choisi.effort_defaut || "—")}</div>
-        <div><span class="faible">Gratuit</span> ${choisi.gratuit ? "oui" : "non"}</div>
-        <div><span class="faible">Modalites</span> ${(choisi.modalites || []).join(", ") || "—"}</div>
-        <div><span class="faible">Expire</span> ${echapper(choisi.expire || "—")}</div>
-        <div><span class="faible">Parametres</span> ${(choisi.parametres || []).map((p) => `<span class="pastille">${echapper(p)}</span>`).join(" ") || "—"}</div>
-        ${choisi.description ? `<div class="faible" style="margin-top:5px;font-size:10.5px">${echapper(choisi.description.slice(0, 300))}</div>` : ""}
-      </div>
-    </details>` : ""}
+          <summary class="faible" style="cursor:pointer">
+            Ce que le proxy dit de ${echapper(choisi.id)}</summary>
+          <div class="fiche-modele">
+            <div><span class="faible">Nom</span> ${echapper(choisi.nom || "—")}</div>
+            <div><span class="faible">Contexte</span> ${choisi.contexte ? (choisi.contexte / 1000).toFixed(0) + "k" : "—"}</div>
+            <div><span class="faible">Sortie max</span> ${choisi.max_completion || "—"}</div>
+            <div><span class="faible">Raisonnement</span> ${choisi.raisonnement_obligatoire ? "obligatoire" : "optionnel"}</div>
+            <div><span class="faible">Effort par defaut</span> ${echapper(choisi.effort_defaut || "—")}</div>
+            <div><span class="faible">Gratuit</span> ${choisi.gratuit ? "oui" : "non"}</div>
+            <div><span class="faible">Modalites</span> ${(choisi.modalites || []).join(", ") || "—"}</div>
+            <div><span class="faible">Expire</span> ${echapper(choisi.expire || "—")}</div>
+            <div><span class="faible">Parametres</span> ${(choisi.parametres || []).map((p) => `<span class="pastille">${echapper(p)}</span>`).join(" ") || "—"}</div>
+            ${choisi.description ? `<div class="faible" style="margin-top:5px;font-size:10.5px">${echapper(choisi.description.slice(0, 300))}</div>` : ""}
+            <!-- tout ce que le proxy renvoie, brut : aliases, canonical_slug,
+                 knowledge_cutoff, default_parameters, pricing complet... -->
+            <details style="margin-top:7px">
+              <summary class="faible" style="cursor:pointer;font-size:10.5px">
+                Tout ce que le proxy renvoie, brut (${Object.keys(choisi.brut || {}).length} champs)</summary>
+              <pre class="brut-json">${echapper(JSON.stringify(choisi.brut || {}, null, 2))}</pre>
+            </details>
+          </div>
+        </details>` : ""}
   </div>`;
 
   // ---------- les modeles ----------
