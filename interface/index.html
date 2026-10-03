@@ -251,6 +251,27 @@
   .modal .rangee { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
   .cache { display: none !important; }
   .scroll { max-height: 340px; overflow: auto; }
+
+  /* --- Banc : leviers et resultats --- */
+  /* une pastille est une petite info chiffonnee : gratuit, effort, verdict */
+  .pastille {
+    display: inline-block; padding: 0 5px; margin-left: 4px;
+    border: 1px solid var(--border); border-radius: 7px;
+    font-size: 9.5px; line-height: 15px; color: var(--muted-foreground);
+    vertical-align: middle; white-space: nowrap;
+  }
+  .pastille.ok { border-color: var(--ok); color: var(--ok); }
+  .pastille.warn { border-color: var(--warn, #d68910); color: var(--warn, #d68910); }
+  .alerte { color: var(--warn, #d68910); }
+
+  /* la fiche d'un modele : nom, contexte, efforts, parametres supportes */
+  .fiche-modele {
+    margin-top: 7px; padding: 9px 11px;
+    border: 1px solid var(--border); border-radius: 7px;
+    background: var(--card, transparent);
+    font-size: 11.5px; line-height: 1.75;
+  }
+  .fiche-modele > div > span.faible { display: inline-block; min-width: 128px; }
 </style>
 </head>
 <body>
@@ -273,8 +294,8 @@
     </div>
     <div class="pliste" id="pliste"></div>
     <div class="pied" style="flex-direction:column">
-      <button class="btn plein" id="btn-bench"
-        title="Test de performances des modeles (global, hors projet)">Bench des modeles</button>
+      <button class="btn plein" id="btn-banc"
+        title="Mesurer les modeles sur nos 4 scenarios de production (global, hors projet)">Banc des modeles</button>
       <button class="btn plein acc" id="btn-creer">+ Creer un projet</button>
     </div>
   </aside>
@@ -463,21 +484,18 @@ function dessinerProjets() {
     b.addEventListener("click", () => chargerProjet(b.dataset.projet)));
 }
 
-// Modeles proposes par le proxy, pour les listes deroulantes.
-async function chargerModeles() {
+async function chargerBanc() {
+  // le catalogue alimente aussi les dropdowns d'Options : S.modeles reste
+  // une liste d'ids, comme avant
   try {
-    const d = await api("/bench/modeles");
-    S.modeles = d.modeles || [];
-    S.modelesErreur = d.erreur || "";
-  } catch (e) {
-    S.modeles = [];
-    S.modelesErreur = "serveur injoignable";
-  }
-}
-
-async function chargerBench() {
-  try { S.bench = await api("/bench/resultats"); }
-  catch (e) { S.bench = null; }
+    const cat = await api("/banc/catalogue");
+    S.bancCatalogue = cat;
+    S.bancScenarios = cat.scenarios || [];
+    S.modeles = (cat.modeles || []).map((m) => m.id);
+    S.modelesErreur = cat.erreur || "";
+  } catch (e) { S.modeles = []; S.modelesErreur = "serveur injoignable"; }
+  try { S.banc = await api("/banc/resultats"); }
+  catch (e) { S.banc = null; }
 }
 
 async function chargerProjet(nom) {
@@ -692,12 +710,12 @@ function demarrerPoll() {
 function dessinerVue() {
   const v = $("#vue");
   // le bench est global : il s'affiche meme sans projet
-  if (S.vue === "bench") { vueBench(v); return; }
+  if (S.vue === "banc") { vueBanc(v); return; }
   if (!S.actif) {
     v.innerHTML = '<p class="vide">Aucun projet. Cree-en un avec le bouton en bas a droite.</p>';
     return;
   }
-  if (S.vue === "bench") { vueBench(v); return; }
+  if (S.vue === "banc") { vueBanc(v); return; }
   ({
     config: vueConfig, options: vueOptions, contexte: vueContexte,
     polices: vuePolices, glossaire: vueGlossaire, pdfs: vuePdfs, log: vueLog,
@@ -753,23 +771,31 @@ function memeModele(a, b) {
 // On lit la MOINDRE config : un modele qui a reussi une fois n'est pas mort.
 function echecsModeles() {
   const out = new Map();
-  const confs = S.bench?.configs || {};
-  const raisons = (l) => {
-    const e = (l.erreur || "").match(/HTTP Error (\d+)/);
-    if (e) return e[1] === "404" ? "404" : e[1] === "400" ? "400" : e[1];
-    return "echec";
-  };
-  for (const lignes of Object.values(confs)) {
-    for (const l of lignes || []) {
-      const ok = Number((l.ok || "0/0").split("/")[0]);
-      if (ok > 0) {
-        out.delete(l.modele);          // il a reussi quelque part
-      } else if (!out.has(l.modele)) {
-        out.set(l.modele, raisons(l));
-      }
+  for (const m of S.banc?.resultats?.modeles || []) {
+    const ok = Number((m.reussis || "0/0").split("/")[0]);
+    if (ok > 0) {
+      out.delete(m.modele);            // il a reussi quelque part
+      continue;
     }
+    if (out.has(m.modele)) continue;
+    // on retient la raison du premier scenario qui a echoue
+    for (const s of (S.bancScenarios || [])) {
+      const r = m[s];
+      if (r && !r.ok && r.erreur) { out.set(m.modele, raison(r.erreur)); break; }
+    }
+    if (!out.has(m.modele)) out.set(m.modele, "echec");
   }
   return out;
+}
+
+// "429" / "404" / "400" pour l'affichage court dans les listes deroulantes
+function raison(texte) {
+  const m = (texte || "").match(/HTTP (\d{3})/);
+  if (m) return m[1];
+  if (/429|quota|rate limit/i.test(texte)) return "429";
+  if (/Timeout|timed out/i.test(texte)) return "timeout";
+  if (/Invalid option|400/i.test(texte)) return "400";
+  return "echec";
 }
 
 // Un <select> de 425 modeles est inutilisable : on prend un champ texte
@@ -816,14 +842,10 @@ function champModele(cle, libelle, aide = "") {
 // Les mesures du dernier bench, par modele : {modele: {lat: [...], tok: [...]}}
 function perfModeles() {
   const out = new Map();
-  for (const lignes of Object.values(S.bench?.configs || {})) {
-    for (const l of lignes || []) {
-      if (!l.lat_moy_s) continue;
-      const p = out.get(l.modele) || { lat: [], tok: [] };
-      p.lat.push(l.lat_moy_s);
-      if (l.tok_sortie_moy) p.tok.push(l.tok_sortie_moy);
-      out.set(l.modele, p);
-    }
+  for (const m of S.banc?.resultats?.modeles || []) {
+    if (!m.lat_moy) continue;
+    out.set(m.modele, { lat: m.lat_moy, tok: m.tok_sortie_moy || null,
+                        exploitables: m.exploitables, tronques: m.tronces });
   }
   return out;
 }
@@ -1564,82 +1586,140 @@ function comparer(nomSource, trad, v) {
 }
 
 // --- bench (global, hors projet) ---
-async function vueBench(v) {
+async function vueBanc(v) {
   let d;
-  try { d = await api("/bench/resultats"); }
+  try { d = await api("/banc/resultats"); }
   catch (e) { v.innerHTML = `<p class="vide">${echapper(e.message)}</p>`; return; }
-  S.bench = d;
 
-  const confs = d.configs || {};
-  const enCours = d.etat === "en_cours";
+  S.banc = d;
+  const res = d.resultats || {};
+  const etat = d.etat || {};
+  const enCours = etat.etat === "en_cours";
 
   let html = `<div class="bloc">
-    <h2 class="titre">Test de performances — global</h2>
+    <h2 class="titre">Banc — global</h2>
     <p class="faible" style="margin:0 0 9px">
-      Mesure les modeles gratuits du proxy sur ${(Object.keys(confs).length) ? "des" : "6"} textes de
-      reference. Les resultats servent a choisir dans <b>Options</b>.
-      ${d.maj ? `Dernier test : ${echapper(d.maj)}.` : ""}</p>
+      Mesure chaque modele sur nos <b>4 scenarios de production</b> : traduction,
+      glossaire, contexte, polices. Les prompts viennent du code de production,
+      donc ce que tu mesures ici est ce que le systeme fait vraiment.
+      ${res.maj ? `Dernier banc : ${echapper(res.maj)}.` : ""}</p>
 
     <div class="rangee" style="margin-bottom:9px">
-      <label class="rangee"><span class="faible">Configs</span>
-        <select id="cfg">
-          <option value="rapide">Rapide (1 config, ~1 min)</option>
-          <option value="complet">Complet (6 configs, ~15 min)</option>
-        </select></label>
-      <label class="rangee"><span class="faible">Appels en parallele</span>
-        <input type="number" id="wk" value="3" min="1" max="8" style="width:64px"></label>
-      <button class="btn acc" id="lancer" ${enCours ? "disabled" : ""}>
-        ${enCours ? "Test en cours…" : "Lancer le test"}</button>
-      ${enCours ? '<button class="btn danger" id="stop">Arreter</button>' : ""}
-      <button class="btn" id="rafraichir">Rafraichir</button>
+      <button class="btn acc" id="b-lancer" ${enCours ? "disabled" : ""}>
+        ${enCours ? "Banc en cours…" : "Lancer le banc"}</button>
+      ${enCours ? '<button class="btn danger" id="b-stop">Arreter</button>' : ""}
+      <button class="btn" id="b-rafraichir">Rafraichir</button>
+      <span class="faible">${res.modeles ? res.modeles.length : 0} resultat(s)</span>
     </div>
-
-    <div class="barre-prog"><i id="barre-bench"></i></div>
-    <div class="log" id="log-bench" style="max-height:150px">${echapper(d.log || "(aucun log)")}</div>
+    ${etat.erreur ? `<p class="vide">${echapper(etat.erreur)}</p>` : ""}
+    ${etat.log ? `<div class="log" style="max-height:120px">${echapper(etat.log)}</div>` : ""}
   </div>`;
 
-  // --- modeles a tester
+  // ---------- les leviers ----------
+  // Le modele choisi determine ce qui est disponible : on ne propose pas
+  // un effort a un modele qui n'en liste pas.
+  const ids = [...v.querySelectorAll("[data-mod]:checked")].map((c) => c.dataset.mod);
+  const cat = S.bancCatalogue || { modeles: [], leviers: {} };
+  const choisi = cat.modeles.find((m) => m.id === ids[0]);
+  const niveaux = choisi ? (choisi.efforts || []) : [];
+
   html += `<div class="bloc">
-    <h2 class="titre">Modeles a tester — ${S.modeles.length}</h2>
-    <div class="rangee" style="margin-bottom:7px">
-      <button class="btn mini" id="tous-mod">Tout cocher</button>
-      <button class="btn mini" id="aucun-mod">Tout decocher</button>
-      <span class="faible">${S.modeles.length} modeles gratuits disponibles</span>
+    <h2 class="titre">Leviers de l'appel</h2>
+    <p class="faible" style="margin:0 0 8px">
+      Les reglages ci-dessous sont ceux que tu changes. Les autres parametres
+      supportes par le modele sont listes en dessous, en lecture seule.</p>
+    <div class="rangee">
+      <label class="rangee"><span class="faible">Effort de raisonnement</span>
+        <select id="b-effort" ${niveaux.length ? "" : "disabled"}>
+          <option value="auto">auto — celui de la production (${cat.leviers.effort || "low"})</option>
+          ${niveaux.map((e) => `<option value="${e}">${e}</option>`).join("")}
+        </select></label>
+      <label class="rangee"><span class="faible">Tokens max</span>
+        <input type="number" id="b-maxtok" value="${cat.leviers.max_tokens || 16000}"
+               min="1000" max="200000" step="1000" style="width:104px"></label>
+      <label class="rangee"><span class="faible">Temperature</span>
+        <input type="number" id="b-temp" value="0" min="0" max="2" step="0.1"
+               style="width:70px"></label>
+      <label class="rangee"><span class="faible">Timeout</span>
+        <input type="number" id="b-timeout" value="180" min="30" max="900" step="30"
+               style="width:76px"></label>
     </div>
-    <div class="scroll" style="max-height:200px;columns:2">
-      ${S.modeles.map((m) => `<label class="case">
-        <input type="checkbox" data-mod="${echapper(m)}" checked>
-        <span style="font-size:11.5px">${echapper(m)}</span></label>`).join("")}
-    </div>
-    ${S.modelesErreur ? `<p class="vide">${echapper(S.modelesErreur)}</p>` : ""}
+    ${choisi ? `<details style="margin-top:9px">
+      <summary class="faible" style="cursor:pointer">
+        Ce que le proxy dit de ${echapper(choisi.id)}</summary>
+      <div class="fiche-modele">
+        <div><span class="faible">Nom</span> ${echapper(choisi.nom || "—")}</div>
+        <div><span class="faible">Contexte</span> ${choisi.contexte ? (choisi.contexte / 1000).toFixed(0) + "k" : "—"}</div>
+        <div><span class="faible">Sortie max</span> ${choisi.max_completion || "—"}</div>
+        <div><span class="faible">Raisonnement</span> ${choisi.raisonnement_obligatoire ? "obligatoire" : "optionnel"}</div>
+        <div><span class="faible">Effort par defaut</span> ${echapper(choisi.effort_defaut || "—")}</div>
+        <div><span class="faible">Gratuit</span> ${choisi.gratuit ? "oui" : "non"}</div>
+        <div><span class="faible">Modalites</span> ${(choisi.modalites || []).join(", ") || "—"}</div>
+        <div><span class="faible">Expire</span> ${echapper(choisi.expire || "—")}</div>
+        <div><span class="faible">Parametres</span> ${(choisi.parametres || []).map((p) => `<span class="pastille">${echapper(p)}</span>`).join(" ") || "—"}</div>
+        ${choisi.description ? `<div class="faible" style="margin-top:5px;font-size:10.5px">${echapper(choisi.description.slice(0, 300))}</div>` : ""}
+      </div>
+    </details>` : ""}
   </div>`;
 
-  // --- resultats
-  const nomsConf = Object.keys(confs);
-  if (!nomsConf.length) {
-    html += `<div class="bloc"><p class="vide">Aucun resultat. Lance un test.</p></div>`;
+  // ---------- les modeles ----------
+  const libres = cat.modeles || [];
+  const gratuits = libres.filter((m) => m.gratuit).length;
+  html += `<div class="bloc">
+    <h2 class="titre">Modeles — ${libres.length} proposes, ${gratuits} gratuits</h2>
+    <div class="rangee" style="margin-bottom:7px">
+      <input type="text" id="b-filtre" placeholder="filtrer…" style="flex:1;min-width:120px">
+      <button class="btn mini" id="b-gratuits">Gratuits</button>
+      <button class="btn mini" id="b-aucun">Tout decocher</button>
+    </div>
+    <div class="scroll" style="max-height:230px;columns:2" id="b-liste">
+      ${libres.map((m) => `<label class="case" data-nom="${echapper(m.id.toLowerCase())}">
+        <input type="checkbox" data-mod="${echapper(m.id)}"
+          ${m.id === "stealth/space-bunny-alpha" ? "checked" : ""}>
+        <span style="font-size:11.5px">${echapper(m.id)}
+          ${m.gratuit ? '<span class="pastille ok">gratuit</span>' : ""}
+          ${m.raisonnement_obligatoire ? `<span class="pastille">${m.efforts ? "raisonnement" : "raisonnement fixe"}</span>` : ""}</span>
+      </label>`).join("")}
+    </div>
+  </div>`;
+
+  // ---------- les resultats ----------
+  if (!res.modeles || !res.modeles.length) {
+    html += `<div class="bloc"><p class="vide">Aucun resultat. Coche un modele et lance le banc.</p></div>`;
   } else {
-    for (const nomConf of nomsConf) {
-      const lignes = [...(confs[nomConf] || [])].sort(
-        (a, b) => (a.lat_moy_s ?? 9999) - (b.lat_moy_s ?? 9999));
+    for (const m of res.modeles) {
       html += `<div class="bloc">
-        <h2 class="titre">${echapper(nomConf)}</h2>
-        <div class="scroll-tab"><table><tr>
-          <th>Modele</th><th>Reussis</th><th>Latence moy.</th><th>Max</th>
-          <th>Tokens</th><th>Reflexion</th><th>Balises</th><th>Ratio</th><th>Erreur</th>
-        </tr>`;
-      for (const l of lignes) {
-        const bon = l.lat_moy_s && l.lat_moy_s < 8;
+        <h2 class="titre">${echapper(m.modele)}
+          <span class="faible" style="font-weight:400">${m.reussis} reussis —
+            lat moy ${m.lat_moy ?? "—"}s, max ${m.lat_max ?? "—"}s —
+            ${m.exploitables} exploitables${m.tronces ? `, <span class="alerte">${m.tronces} tronque(s)</span>` : ""}</span></h2>
+        <div class="scroll-tab"><table>
+          <tr><th>Scenario</th><th>Latence</th><th>Tokens ent./sort.</th><th>Raisonnement</th>
+              <th>Termes</th><th>Balises</th><th>Ratio</th><th>Finish</th><th>Verdict</th><th>Erreur</th></tr>`;
+      for (const s of (S.bancScenarios || [])) {
+        const r = m[s] || {};
+        const etiq = { traduction: "Traduction", glossaire: "Glossaire",
+                       contexte: "Contexte", polices: "Polices" }[s] || s;
+        if (!r.ok) {
+          html += `<tr><td>${etiq}</td><td class="faible">${r.latence ?? "—"}s</td>
+            <td colspan="8" style="color:var(--danger,#c0392b);font-size:11px">${echapper((r.erreur || "echec").slice(0, 70))}</td></tr>`;
+          continue;
+        }
+        const bon = r.exploitable;
         html += `<tr>
-          <td>${echapper(l.modele)}</td>
-          <td class="${l.ok?.startsWith(l.ok?.split("/")[1]) ? "" : "faible"}">${echapper(l.ok)}</td>
-          <td${bon ? ' style="color:var(--ok)"' : ""}>${l.lat_moy_s ?? "—"}s</td>
-          <td class="faible">${l.lat_max_s ?? "—"}s</td>
-          <td class="faible">${l.tok_sortie_moy ?? "—"}</td>
-          <td class="faible">${echapper(l.reflexion_fuite ?? "—")}</td>
-          <td>${echapper(l.balises ?? "—")}</td>
-          <td class="faible">${l.ratio ?? "—"}</td>
-          <td class="faible" style="font-size:10.5px">${echapper((l.erreur || "").slice(0, 40))}</td>
+          <td>${etiq}</td>
+          <td${bon ? ' style="color:var(--ok)"' : ""}>${r.latence}s</td>
+          <td class="faible">${r.tok_entree ?? "—"} / ${r.tok_sortie ?? "—"}</td>
+          <td class="faible">${r.tok_raisonnement ?? "—"}</td>
+          <td>${r.termes ?? "—"}</td>
+          <td>${echapper(r.balises ?? "—")}</td>
+          <td class="faible">${r.ratio ?? "—"}</td>
+          <td class="faible">${echapper(r.finish || "—")}</td>
+          <td>${bon ? '<span class="pastille ok">exploitable</span>'
+                   : `<span class="pastille warn">${r.tronce ? "tronque" : "inexploitable"}</span>`}</td>
+          <td class="faible" style="font-size:10.5px">${
+            [r.reflexion_fuite ? "reflexion fuit" : "", r.identique ? "identique" : ""]
+              .filter(Boolean).join(", ") || "—"}</td>
         </tr>`;
       }
       html += `</table></div></div>`;
@@ -1648,31 +1728,46 @@ async function vueBench(v) {
 
   v.innerHTML = html;
 
-  const btn = v.querySelector("#lancer");
-  if (btn) btn.addEventListener("click", async () => {
+  // ---------- branchements ----------
+  const bl = v.querySelector("#b-lancer");
+  if (bl) bl.addEventListener("click", async () => {
     const modeles = [...v.querySelectorAll("[data-mod]:checked")].map((c) => c.dataset.mod);
     if (!modeles.length) return notif("Coche au moins un modele", true);
     try {
-      await api("/bench/lancer", { method: "POST", body: JSON.stringify({
-        modeles, configs: [v.querySelector("#cfg").value],
-        workers: Number(v.querySelector("#wk").value) || 3,
+      await api("/banc/lancer", { method: "POST", body: JSON.stringify({
+        modeles,
+        effort: v.querySelector("#b-effort")?.value || "auto",
+        max_tokens: Number(v.querySelector("#b-maxtok")?.value) || 16000,
+        temperature: Number(v.querySelector("#b-temp")?.value) || 0,
+        timeout: Number(v.querySelector("#b-timeout")?.value) || 180,
       }) });
-      notif("Test lance");
-      vueBench(v);
+      notif("Banc lance");
+      vueBanc(v);
     } catch (e) { notif(e.message, true); }
   });
-  const stop = v.querySelector("#stop");
-  if (stop) stop.addEventListener("click", async () => {
-    try { await api("/bench/arreter", { method: "POST", body: "{}" }); notif("Arrete"); vueBench(v); }
+
+  const bs = v.querySelector("#b-stop");
+  if (bs) bs.addEventListener("click", async () => {
+    try { await api("/banc/arreter", { method: "POST", body: "{}" }); notif("Arrete"); vueBanc(v); }
     catch (e) { notif(e.message, true); }
   });
-  v.querySelector("#rafraichir").addEventListener("click", () => vueBench(v));
-  v.querySelector("#tous-mod").addEventListener("click", () => {
-    v.querySelectorAll("[data-mod]").forEach((c) => (c.checked = true));
+  v.querySelector("#b-rafraichir")?.addEventListener("click", () => vueBanc(v));
+  v.querySelector("#b-aucun")?.addEventListener("click", () =>
+    v.querySelectorAll("[data-mod]").forEach((c) => (c.checked = false)));
+  v.querySelector("#b-gratuits")?.addEventListener("click", () =>
+    v.querySelectorAll("[data-mod]").forEach((c) => {
+      const m = (S.bancCatalogue?.modeles || []).find((x) => x.id === c.dataset.mod);
+      c.checked = !!m?.gratuit;
+    }));
+  v.querySelector("#b-filtre")?.addEventListener("input", (e) => {
+    const q = e.target.value.toLowerCase();
+    v.querySelectorAll("#b-liste .case").forEach((l) => {
+      l.style.display = l.dataset.nom.includes(q) ? "" : "none";
+    });
   });
-  v.querySelector("#aucun-mod").addEventListener("click", () => {
-    v.querySelectorAll("[data-mod]").forEach((c) => (c.checked = false));
-  });
+  // le choix du modele pilote les leviers disponibles
+  v.querySelectorAll("[data-mod]").forEach((c) =>
+    c.addEventListener("change", () => vueBanc(v)));
 }
 
 // --- log ---
@@ -1761,8 +1856,8 @@ $("#onglets").addEventListener("click", (ev) => {
 });
 
 // Le bench n'est pas un projet : on decoche les onglets pendant qu'on est dedans.
-$("#btn-bench").addEventListener("click", () => {
-  S.vue = "bench";
+$("#btn-banc").addEventListener("click", () => {
+  S.vue = "banc";
   document.querySelectorAll(".onglet").forEach((o) => o.classList.remove("on"));
   $("#projet-titre").textContent = "";
   dessinerVue();
@@ -1793,24 +1888,31 @@ async function init() {
   await majProxy();
   setInterval(majProxy, 10000);   // reverifie regulierement
   await Promise.all([
-    chargerModeles(),
-    chargerBench(),          // pour savoir quels modeles ont echoue
+    chargerBanc(),
+    chargerBanc(),           // catalogue : alimente aussi les dropdowns
   ]);
-  suivreBench();
+  suivreBanc();
   await chargerProjets();
 }
 
 // Rafraichit le panneau bench tant qu'un test tourne.
-function suivreBench() {
-  clearInterval(S.benchLog);
-  S.benchLog = setInterval(async () => {
-    if (S.vue !== "bench") return;
+function suivreBanc() {
+  clearInterval(S.bancLog);
+  S.bancLog = setInterval(async () => {
+    if (S.vue !== "banc") return;
     try {
-      const d = await api("/bench/resultats");
-      const log = document.querySelector("#log-bench");
-      if (log) { log.textContent = d.log || "(aucun log)"; log.scrollTop = log.scrollHeight; }
-      if (d.etat !== "en_cours" && S.bench?.etat === "en_cours") vueBench($("#vue"));
-      S.bench = d;
+      const d = await api("/banc/resultats");
+      const etat = d.etat || {};
+      S.banc = d;
+      const log = document.querySelector("#log-banc");
+      if (log && etat.log) { log.textContent = etat.log; log.scrollTop = log.scrollHeight; }
+      // on ne redessine que quand le banc se termine : sinon le redessin
+      // efface le curseur et les cases a cocher pendant qu'on clique
+      if (etat.etat !== "en_cours" && S.bancEtat === "en_cours") {
+        vueBanc($("#vue"));
+        notif("Banc termine");
+      }
+      S.bancEtat = etat.etat;
     } catch (e) { /* ignore */ }
   }, 2000);
 }

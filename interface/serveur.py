@@ -35,9 +35,7 @@ DEPOT = RACINE  # le serveur vit dans le depot (PDFMathTranslate/interface/)
 PROJETS = RACINE.parent / "Projets"
 # Donnees globales, hors projet : resultats de bench, textes de reference.
 GLOBAL = RACINE.parent / "Global"
-BENCH_DIR = GLOBAL / "bench"
-BENCH_RESULTATS = BENCH_DIR / "resultats.json"
-BENCH_SCRIPT = DEPOT / "bench.py"
+BANC_DIR = GLOBAL / "banc"
 INTERFACE = Path(__file__).resolve().parent
 
 # Python et scripts du projet
@@ -105,8 +103,16 @@ ETAPES_TOUT = ("contexte", "polices", "glossaire", "traduire")
 
 RE_PROGRESS = re.compile(r"^\[PROGRESS\]\s+(\d+)/(\d+)\s*(.*)$")
 
-# Etat du bench : global, un seul a la fois.
-BENCH: dict = {"etat": "pret", "log": "", "debut": None, "erreur": ""}
+# Les reglages du Banc : ils ne sont pas arbitraires, ils reprennent ceux
+# d'analyser.py. Un seul point de verite, sinon l'interface ment sur ce que
+# la production fait vraiment.
+sys.path.insert(0, str(DEPOT))
+try:
+    import analyser as _analyseur_mod
+
+    EFFORT, MAX_TOKENS = _EFFORT, _MAX_TOKENS
+except Exception:  # noqa: BLE001
+    EFFORT, MAX_TOKENS = "low", 16000
 
 
 # ---------------------------------------------------------------- securite
@@ -1313,122 +1319,113 @@ def _proxy_actif() -> bool:
 # ---------------------------------------------------------------- bench
 
 
-@app.get("/api/bench/modeles")
-def api_bench_modeles():
-    """Les modeles gratuits proposes par le proxy, pour cocher ceux a tester."""
-    import urllib.request
+# ------------------------------------------------------------------ Banc
+# Un seul outil de test. banc.py pilote tout : catalogue, leviers, scenarios,
+# mesures. Le serveur ne fait que relayer — la logique reste testable seule.
 
-    try:
-        req = urllib.request.Request(
-            "http://127.0.0.1:8645/v1/models",
-            headers={"Authorization": "Bearer hermes"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as r:
-            d = json.load(r)
-    except Exception as e:
-        return {"modeles": [], "erreur": f"proxy injoignable ({type(e).__name__})"}
+BANC: dict = {"etat": "pret", "log": "", "debut": None, "erreur": ""}
 
-    # Tous les modeles, pas seulement les ":free" : space-bunny-alpha n'a pas
-    # de suffixe gratuit et repond meme quand les quotas gratuits sont epuises.
-    noms = sorted(m.get("id", "") for m in d.get("data", []))
-    gratuits = [n for n in noms if n.endswith(":free")]
+
+@app.get("/api/banc/catalogue")
+def api_banc_catalogue():
+    """Tout ce que le proxy dit des modeles : contexte, parametres, efforts.
+
+    C'est la source de verite. L'interface affiche ces donnees telles quelles
+    pour que le choix du modele se fasse sur des faits, pas sur une intuition.
+    """
+    import banc
+
+    modeles = banc.catalogue()
+    if len(modeles) == 1 and modeles[0].get("erreur"):
+        return {"modeles": [], "erreur": modeles[0]["id"]}
+
+    # les leviers reglables, avec leurs valeurs par defaut issues de la prod
     return {
-        "modeles": noms,
-        "gratuits": gratuits,
+        "modeles": modeles,
+        "scenarios": list(banc.SCENARIOS),
+        "leviers": {
+            "effort": EFFORT,
+            "max_tokens": MAX_TOKENS,
+            "temperature": 0,
+            "efforts_par_modele": {
+                m["id"]: m["efforts"] for m in modeles if m["efforts"]
+            },
+        },
         "erreur": "",
     }
 
 
-@app.get("/api/bench/resultats")
-def api_bench_resultats():
-    """Resultats du dernier bench + l'etat du run en cours."""
-    if BENCH_RESULTATS.is_file():
-        try:
-            d = json.loads(BENCH_RESULTATS.read_text(encoding="utf-8"))
-            d["etat"] = BENCH["etat"]
-            d["log"] = BENCH["log"][-8000:]
-            d["erreur_run"] = BENCH.get("erreur", "")
-            return d
-        except (json.JSONDecodeError, OSError) as e:
-            return {"configs": {}, "etat": BENCH["etat"], "erreur": str(e)}
-    return {
-        "configs": {},
-        "maj": None,
-        "etat": BENCH["etat"],
-        "log": BENCH["log"][-8000:],
-        "erreur_run": BENCH.get("erreur", ""),
+@app.get("/api/banc/resultats")
+def api_banc_resultats():
+    """Le dernier banc, et l'etat d'un banc en cours."""
+    import banc
+
+    return {"resultats": banc.charger(), "etat": dict(BANC)}
+
+
+@app.post("/api/banc/lancer")
+def api_banc_lancer(payload: dict):
+    """Lance un banc. modeles : liste d'ids. leviers : les reglages."""
+    if BANC["etat"] == "en_cours":
+        raise HTTPException(409, "un banc tourne deja")
+
+    import banc
+
+    ids = payload.get("modeles") or []
+    catalogue = {m["id"]: m for m in banc.catalogue() if not m.get("erreur")}
+    choisis = [catalogue[i] for i in ids if i in catalogue]
+    if not choisis:
+        raise HTTPException(400, "aucun modele connu dans la selection")
+
+    leviers = {
+        "effort": payload.get("effort"),
+        "max_tokens": int(payload.get("max_tokens") or MAX_TOKENS),
+        "temperature": payload.get("temperature", 0),
     }
+    # si l'utilisateur ne fixe pas d'effort, on prend celui de la production
+    if leviers["effort"] in (None, "", "auto"):
+        leviers["effort"] = banc.effort_serieux(choisis[0])
+        if not leviers["effort"]:
+            leviers["effort"] = None
+    timeout = int(payload.get("timeout") or 180)
+
+    BANC.update(etat="en_cours", log="", erreur="",
+                debut=datetime.now().isoformat(timespec="seconds"))
+
+    def _travail():
+        try:
+            r = banc.lancer(choisis, leviers, timeout=timeout)
+            banc.BENCH.mkdir(parents=True, exist_ok=True)
+            banc.RESULTATS.write_text(
+                json.dumps(r, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            BANC["log"] = _resume_log(r)
+            BANC["etat"] = "termine"
+        except Exception as e:  # noqa: BLE001
+            BANC["etat"] = "erreur"
+            BANC["erreur"] = f"{type(e).__name__}: {e}"
+
+    threading.Thread(target=_travail, daemon=True).start()
+    return {"ok": True, "modeles": len(choisis), "leviers": leviers}
 
 
-@app.post("/api/bench/lancer")
-def api_bench_lancer(payload: dict):
-    """Lance un bench. modeles et configs sont des listes."""
-    if BENCH["etat"] == "en_cours":
-        raise HTTPException(409, "un test tourne deja")
-
-    modeles = payload.get("modeles") or []
-    configs = payload.get("configs") or ["rapide"]
-    workers = int(payload.get("workers") or 3)
-
-    cmd = [str(PY), str(BENCH_SCRIPT), "--workers", str(workers)]
-    if modeles:
-        cmd += ["--modeles", ",".join(modeles)]
-    cmd += ["--configs", ",".join(configs)]
-
-    BENCH_DIR.mkdir(parents=True, exist_ok=True)
-    BENCH.update(
-        etat="en_cours",
-        log="",
-        debut=datetime.now().isoformat(timespec="seconds"),
-        erreur="",
-    )
-
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(DEPOT),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
-        bufsize=1,
-    )
-    threading.Thread(target=_suivre_bench, args=(proc,), daemon=True).start()
-    return {"ok": True, "appels": len(modeles) or "tous"}
+def _resume_log(r: dict) -> str:
+    """Le log du banc : une ligne par modele, lisible dans l'onglet."""
+    lignes = [f"texte de test : {r.get('pdf')} — {r.get('texte_car')} car.",
+              f"leviers : {r.get('leviers')}", ""]
+    for m in r.get("modeles", []):
+        lignes.append(f"{m['modele']}  {m['reussis']} reussis  "
+                      f"lat moy {m['lat_moy']}s  max {m['lat_max']}s  "
+                      f"exploitables {m['exploitables']}  tronques {m['tronces']}")
+    return "\n".join(lignes)
 
 
-def _suivre_bench(proc: subprocess.Popen) -> None:
-    """Suit la sortie du bench et alimente BENCH."""
-    lignes: list[str] = []
-    for ligne in proc.stdout:  # type: ignore[union-attr]
-        lignes.append(ligne.rstrip("\n"))
-        if len(lignes) > 500:
-            del lignes[:150]
-        BENCH["log"] = "\n".join(lignes)
-    proc.wait()
-    BENCH["etat"] = "termine" if proc.returncode == 0 else "erreur"
-    if proc.returncode != 0:
-        BENCH["erreur"] = f"code {proc.returncode}"
-
-
-@app.post("/api/bench/arreter")
-def api_bench_arreter():
-    """Arrete un bench en cours."""
-    import subprocess as sp
-
-    if BENCH["etat"] != "en_cours":
-        return {"ok": True, "rien": True}
-    # on tue les bench.py en cours
-    try:
-        sp.run(
-            ["taskkill", "/F", "/IM", "python.exe", "/FI", "WINDOWTITLE eq bench*"],
-            capture_output=True,
-        )
-    except Exception:
-        pass
-    BENCH["etat"] = "arrete"
-    return {"ok": True}
+@app.post("/api/banc/arreter")
+def api_banc_arreter():
+    """Le banc tourne dans un thread : on ne peut pas le tuer, seulement
+    ignorer son resultat. On le marque donc comme arrete."""
+    if BANC["etat"] == "en_cours":
+        BANC["etat"] = "arrete"
+    return {"ok": True, "etat": BANC["etat"]}
 
 
 # ---------------------------------------------------------------- interface

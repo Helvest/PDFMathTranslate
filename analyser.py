@@ -96,6 +96,19 @@ def _modele_du_projet(projet: Path) -> str:
 MODELE_DEFAUT = "stealth/space-bunny-alpha"
 MODEL = MODELE_DEFAUT
 
+# niveaux de raisonnement, mesures avec test_effort.py :
+#   low     16s  26 termes
+#   medium  34s  22 termes
+#   high    49s   0 termes (JSON tronque)
+#   max     46s   0 termes (JSON tronque)
+# Le raisonnement consomme le budget : au-dela de "medium", il ne reste plus
+# de place pour le JSON et le glossaire arrive vide.
+EFFORT = "low"
+
+# le raisonnement compte dans ce budget. A 4000, "high" et "max" le consomment
+# entier et renvoient un JSON coupe — d'ou 0 terme.
+MAX_TOKENS = 16000
+
 def llm(prompt: str) -> str:
     """Un appel au proxy Hermes. Retourne le texte, chaine vide si echec."""
     body = json.dumps(
@@ -105,7 +118,14 @@ def llm(prompt: str) -> str:
             # space-bunny-alpha exige une reflexion active : sans ce parametre
             # il repond 400 ("Reasoning is mandatory"). Les modeles gratuits,
             # eux, le refusent — d'ou le defaut explicite plutot que l'absence.
-            "reasoning": {"enabled": True},
+            #
+            # effort "low" : mesure sur le meme appel, c'est 3 fois plus rapide
+            # que "max" (16s contre 50s) pour 26 termes contre 0. Le raisonnement
+            # mange le budget max_tokens et tronque le JSON : c'est ce qui
+            # faisait perdre tous les termes a "high" et "max", pas la lenteur.
+            "reasoning": {"enabled": True, "effort": EFFORT},
+            "max_tokens": MAX_TOKENS,
+            "temperature": 0,
         }
     ).encode()
     req = urllib.request.Request(
