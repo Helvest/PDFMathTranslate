@@ -1679,8 +1679,12 @@ async function vueBanc(v, colTri) {
     CHOIX.vue = S.options?.model || "stealth/space-bunny-alpha";
   }
   const vu = cat.modeles.find((m) => m.id === CHOIX.vue) || null;
-  const raisonne = vu
-    ? (vu.raisonnement_obligatoire || (vu.efforts || []).length > 0) : false;
+  // Trois etats, pas deux. Un modele peut savoir raisonner SANS lister de
+  // niveaux (ling-3.1-flash) : conclure "il ne raisonne pas" — ce que
+  // faisait la condition ci-dessous — masquait a tort le seul reglage que
+  // ce modele offre encore.
+  const raisonne = vu ? !!vu.raisonne : false;
+  const aNiveaux = vu ? (vu.efforts || []).length > 0 : false;
   // les niveaux de raisonnement du modele affiche. Si aucun modele n'est
   // affiche, on prend ceux du modele du projet : le dropdown montre alors
   // quelque chose plutot que d'etre mort.
@@ -1758,7 +1762,8 @@ async function vueBanc(v, colTri) {
           style="font-size:11.5px;cursor:pointer;flex:1"
           title="Cliquer pour voir ses details">${echapper(m.id)}
           ${m.raisonnement_obligatoire
-            ? `<span class="pastille">${m.efforts ? "raisonnement" : "raisonnem. fixe"}</span>`
+            ? `<span class="pastille">${m.efforts ? "raisonnement"
+                : "raisonnem. niveau fixe"}</span>`
             : '<span class="pastille warn">sans raisonnement</span>'}</span>
       </div>`).join("")}
     </div>
@@ -1778,8 +1783,11 @@ async function vueBanc(v, colTri) {
         <div><span class="faible">Sortie max</span> ${vu.max_completion || "—"}</div>
         <div><span class="faible">Raisonnement</span> ${
           vu.raisonnement_obligatoire ? "obligatoire" : "possible"}</div>
-        ${!vu.raisonnement_obligatoire ? `<div><span class="faible">Niveaux</span>
-          aucun — ce modele ne raisonne pas</div>` : ""}
+        ${!vu.efforts || !vu.efforts.length ? `<div><span class="faible">Niveaux</span>
+          ${vu.raisonne
+            ? "aucun — ce modele raisonne mais ne dit pas quels niveaux"
+            : "aucun — ce modele ne raisonne pas"}</div>` : `
+          <div><span class="faible">Niveaux</span> ${vu.efforts.join(", ")}</div>`}
         <div><span class="faible">Parametres</span> ${
           (vu.parametres || []).map((p) => `<span class="pastille">${echapper(p)}</span>`).join(" ")
           || "—"}</div>
@@ -1790,14 +1798,18 @@ async function vueBanc(v, colTri) {
         proposes.</p>
       <div class="rangee">
         ${raisonne ? `
+          ${aNiveaux ? `
           <label class="rangee"><span class="faible">Effort</span>
-            <select id="b-effort" ${modelesNiveaux.length ? "" : "disabled"}
+            <select id="b-effort">
               <option value="auto">auto — celui de la production (${
                 cat.leviers.effort || "low"})</option>
               ${modelesNiveaux.map((e) =>
                 `<option value="${e}" ${CHOIX.effort === e ? "selected" : ""}>${e}</option>`
               ).join("")}
-            </select></label>
+            </select></label>` : `
+          <label class="rangee"><span class="faible">Effort</span>
+            <input type="text" value="niveau fixe" disabled style="width:104px"
+              title="Ce modele raisonne mais ne dit pas quels niveaux il accepte"></label>`}
           <label class="rangee"><span class="faible">Raisonnement</span>
             <select id="b-raison">
               <option value="1" ${CHOIX.raisonnement !== false ? "selected" : ""}>actif</option>

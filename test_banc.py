@@ -646,13 +646,51 @@ def test_repetitions() -> None:
     _verifie(r["termes"]["moy"] == 28.3, f"termes moyens faux : {r['termes']['moy']}")
 
 
+def test_raisonne() -> None:
+    """Trois etats, pas deux : raisonner, devoir raisonner, choisir le niveau.
+
+    ling-3.1-flash supporte "reasoning" mais ne liste aucun niveau. Conclure
+    qu'il ne raisonne pas — c'est ce que faisait l'interface — masque a tort
+    le seul reglage que ce modele offre encore.
+    """
+    cat = [m for m in banc.catalogue() if not m.get("erreur")]
+    if not cat:
+        return
+
+    # tout modele qui dit "reasoning" doit porter raisonne=True, meme sans
+    # niveaux
+    for m in cat:
+        params = (m.get("brut") or {}).get("supported_parameters") or []
+        if "reasoning" in params:
+            _verifie(m.get("raisonne") is True,
+                     f"{m['id']} supporte reasoning mais raisonne=False : "
+                     "l'interface va masquer ses leviers a tort")
+
+    # les trois cas :
+    #   niveaux      -> on peut choisir
+    #   sans niveaux  -> on peut activer/desactiver, mais pas choisir
+    #   pas du tout   -> rien
+    for m in cat:
+        if not m.get("raisonne"):
+            continue
+        if m.get("efforts"):
+            _verifie(m.get("raisonnement_obligatoire") is not None,
+                     f"{m['id']} a des niveaux, le statut doit etre connu")
+
+    # le cas reel qu'on a vu : raisonne sans niveaux
+    sans_niveaux = [m for m in cat if m.get("raisonne") and not m.get("efforts")]
+    for m in sans_niveaux:
+        _verifie("reasoning" in (m["brut"].get("supported_parameters") or []),
+                 f"{m['id']} : attendu un modele qui sait raisonner")
+
+
 def main() -> int:
     for fn in (test_catalogue, test_catalogue_complet, test_leviers,
                test_leviers_supports, test_qualite,
                test_scenarios, test_resume, test_charge,
                test_reprise_reponse_vide, test_leviers_api,
                test_score, test_repetitions,
-               test_include_reasoning):
+               test_include_reasoning, test_raisonne):
         fn()
 
     if "--reseau" in sys.argv:

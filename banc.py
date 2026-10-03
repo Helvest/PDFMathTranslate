@@ -89,6 +89,16 @@ def catalogue() -> list[dict]:
             "max_completion": (m.get("top_provider") or {}).get("max_completion_tokens"),
             "parametres": m.get("supported_parameters") or [],
             "modalites": (m.get("architecture") or {}).get("input_modalites") or [],
+            # Trois etats distincts, a ne pas confondre :
+            #   raisonne         le modele sait raisonner
+            #   obligatoire      il ne peut PAS s'en passer
+            #   niveaux          les niveaux qu'on peut choisir
+            # Un modele peut tres bien raisonner sans lister de niveaux :
+            # c'est le cas de ling-3.1-flash. On ne doit pas en conclure
+            # qu'il ne raisonne pas.
+            "raisonne": "reasoning" in (m.get("supported_parameters") or [])
+                        or bool(r.get("mandatory"))
+                        or bool(r.get("supported_efforts")),
             "raisonnement_obligatoire": bool(r.get("mandatory")),
             "efforts": r.get("supported_efforts") or [],
             "effort_defaut": r.get("default_effort"),
