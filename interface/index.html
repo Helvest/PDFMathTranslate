@@ -290,6 +290,25 @@
   .croise td.bon    { color: var(--ok);      font-weight: 700; }
   .croise td.moyen  { color: var(--warn, #d68910); font-weight: 600; }
   .croise td.mauvais{ color: var(--danger, #c0392b); font-weight: 700; }
+
+/* Note de qualité : un anneau filled à 0-100. La couleur suit le verdict,
+   pas la note seule — deux termes à 80 peuvent être l'un « bon », l'autre
+   « à vérifier », et c'est ce mot qui doit à l'œil. */
+.note {
+  display: inline-block; min-width: 30px; padding: 2px 5px;
+  border: 1px solid var(--bordure); border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) calc(var(--n) * 55%), transparent);
+  font: 600 11px/1.3 var(--mono, monospace); cursor: help;
+}
+.note[data-verdict="bon"]    { color: var(--accent); border-color: var(--accent); }
+.note[data-verdict="a verifier"], .note[data-verdict="à vérifier"] { color: var(--attention); }
+.note[data-verdict="probablement inutile"], .note[data-verdict="à supprimer"] {
+  color: var(--danger); text-decoration: line-through;
+}
+/* le detail du calcul : au survol du titre, et en modale au clic */
+tr[data-id] { transition: background .1s }
+tr[data-id].note-ouverte { background: color-mix(in srgb, var(--accent) 8%, transparent) }
+tr[data-id].valide { box-shadow: inset 3px 0 0 var(--accent) }
 </style>
 </head>
 <body>
@@ -1208,7 +1227,7 @@ async function vueGlossaire(v) {
   // tri : le clic d'en-tete prime sur la liste deroulante
   const t = S.tris.glossaire;
   if (t.col && t.sens) {
-    const num = ["occurrences", "nb_pages"].includes(t.col);
+    const num = ["occurrences", "nb_pages", "note", "nb_pdfs"].includes(t.col);
     lignes = [...lignes].sort((a, b) => {
       const x = num ? (Number(a[t.col]) || 0) : String(a[t.col] ?? "").toLowerCase();
       const y = num ? (Number(b[t.col]) || 0) : String(b[t.col] ?? "").toLowerCase();
@@ -1221,12 +1240,17 @@ async function vueGlossaire(v) {
       pdf: (a, b) => (a.sources[0]?.pdf || "zz").localeCompare(b.sources[0]?.pdf || "zz")
                      || a.source.localeCompare(b.source, "fr"),
       pages: (a, b) => (b.nb_pages || 0) - (a.nb_pages || 0),
+      note: (a, b) => (b.note || 0) - (a.note || 0),
+      note_asc: (a, b) => (a.note || 0) - (b.note || 0),
     }[S.tri];
     if (cmp) lignes = [...lignes].sort(cmp);
   }
 
   const pieges = lignes.filter((l) => l.source && l.source === l.target);
   const nOrphelins = tous.filter((x) => x.orphelin).length;
+  S.valides = tous.filter((x) => x.valide).length;
+  const nAutoSansOcc = tous.filter((x) => !x.valide && x.origine === "auto"
+                                     && !x.occurrences).length;
   const affiche = lignes.slice(0, 400);
   const groupe = S.tri === "pdf" && !(t.col && t.sens);
 
@@ -1253,6 +1277,8 @@ async function vueGlossaire(v) {
           <option value="alpha" ${S.tri === "alpha" ? "selected" : ""}>Alphabétique</option>
           <option value="pdf" ${S.tri === "pdf" ? "selected" : ""}>Par PDF</option>
           <option value="pages" ${S.tri === "pages" ? "selected" : ""}>Par nombre de pages</option>
+          <option value="note" ${S.tri === "note" ? "selected" : ""}>Par note (meilleur d'abord)</option>
+          <option value="note_asc" ${S.tri === "note_asc" ? "selected" : ""}>Par note (pires d'abord)</option>
         </select></label>
       <label class="rangee"><span class="faible">PDF</span>
         <select id="filtre">
@@ -1263,17 +1289,22 @@ async function vueGlossaire(v) {
         <input type="checkbox" id="orph-seulement" ${S.filtreOrphelins ? "checked" : ""}>
         <span>orphelines seulement</span></label>
       <button class="btn" id="ajout">+ Ajouter</button>
+      <button class="btn" id="purger-auto"
+        title="Efface les termes extraits automatiquement et sans occurrence. Tes termes validés et tes corrections ne sont pas touchés.">Purger les entrées auto (${nAutoSansOcc})</button>
       <button class="btn acc" id="sv-gloss">Enregistrer</button>
     </div>
     <div class="scroll-tab"><table id="tab-gloss"><tr>
-      ${entete("glossaire", "source", "Source", 'style="width:26%"')}
+      <th style="width:30px" title="Un terme validé est la mémoire du projet : la purge des entrées auto ne le touche pas et rien ne peut le remplacer sans ton accord.">✓</th>
+      ${entete("glossaire", "source", "Source", 'style="width:24%"')}
       ${entete("glossaire", "target", "Cible", 'style="width:26%"')}
       <th>Définition</th>
       ${entete("glossaire", "occurrences", "Occ.")}
       <th>Pages</th>
       ${entete("glossaire", "nb_pages", "Nb p.")}
+      <th title="Dans combien de PDF du projet le terme apparait. Un terme présent dans 3 PDF vaut plus qu'un terme à 10 dans un seul.">PDF</th>
+      ${entete("glossaire", "note", "Note", 'style="width:74px"')}
       ${entete("glossaire", "origines", "PDF d'origine")}
-      <th></th>
+      <th style="width:30px"></th>
     </tr>`;
 
   let dernierPdf = null;
@@ -1282,7 +1313,7 @@ async function vueGlossaire(v) {
       const pdf = l.sources[0]?.pdf || "(sans PDF)";
       if (pdf !== dernierPdf) {
         const n = affiche.filter((x) => (x.sources[0]?.pdf || "(sans PDF)") === pdf).length;
-        html += `<tr class="groupe"><td colspan="8">${echapper(pdf)}
+        html += `<tr class="groupe"><td colspan="9">${echapper(pdf)}
           <span class="faible" style="font-weight:400"> — ${n} terme(s)</span></td></tr>`;
         dernierPdf = pdf;
       }
@@ -1291,7 +1322,9 @@ async function vueGlossaire(v) {
       `${echapper(s.pdf)} p${(s.pages || []).join(",")}` +
       (s.etat === "absent" ? " (absent)" : "")).join(" · ");
     const piege = l.source && l.source === l.target ? ' style="color:var(--attention)"' : "";
-    html += `<tr${piege} data-id="${l.id}">
+    html += `<tr class="${l.valide ? "valide" : ""}"${piege} data-id="${l.id}">
+      <td><input type="checkbox" data-valide ${l.valide ? "checked" : ""}
+        title="${l.valide ? "Validé — la purge ne le touchera pas" : "Valider ce terme"}"></td>
       <td><input type="text" data-src value="${echapper(l.source)}" style="width:100%"></td>
       <td><input type="text" data-tgt value="${echapper(l.target)}" style="width:100%"></td>
       <td class="faible" style="font-size:11px">${echapper(l.definition || "—")}</td>
@@ -1300,6 +1333,10 @@ async function vueGlossaire(v) {
         value="${echapper(l.sources.flatMap((s) => s.pages).join(","))}"
         style="width:100%" placeholder="6-10"></td>
       <td class="faible">${echapper(l.nb_pages || "—")}</td>
+      <td class="faible">${l.nb_pdfs ? echapper(l.nb_pdfs) : "—"}</td>
+      <td><button class="note" data-detail="${l.id}" data-verdict="${echapper(l.verdict || "")}"
+        title="${echapper(l.verdict || "")} — clique pour voir le calcul"
+        style="--n:${(l.note || 0) / 100}">${l.note ?? "—"}</button></td>
       <td class="faible" style="font-size:11px">${srcs || "—"}</td>
       <td><button class="btn mini" data-suppr>✕</button></td>
     </tr>`;
@@ -1355,6 +1392,69 @@ async function vueGlossaire(v) {
       chargerProjet(S.actif);
       vueGlossaire(v);
     } catch (e) { notif(e.message, true); }
+  });
+
+  // --- valider / decocher un terme : c'est ce qui decide de ce qui survit
+  //     a la purge. Une case cochee = la memoire du projet.
+  v.addEventListener("change", async (e) => {
+    const box = e.target.closest("[data-valide]");
+    if (!box) return;
+    const tr = box.closest("tr");
+    try {
+      await api(`/projets/${nom}/glossaire/${tr.dataset.id}/valider`, {
+        method: "POST", body: JSON.stringify({ valide: box.checked }) });
+      tr.classList.toggle("valide", box.checked);
+      notif(box.checked ? "Terme validé — la purge ne le touchera pas"
+                       : "Validation retirée");
+    } catch (err) {
+      box.checked = !box.checked;
+      notif(err.message, true);
+    }
+  });
+
+  // --- le detail du calcul : pourquoi cette note ?
+  v.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-detail]");
+    if (!b) return;
+    const tr = b.closest("tr");
+    if (tr.classList.contains("note-ouverte")) {
+      tr.classList.remove("note-ouverte");
+      tr.querySelector(".detail-note")?.remove();
+      return;
+    }
+    // les donnees sont deja chargees : pas d'aller-retour inutile
+    const tous = await api(`/projets/${nom}/glossaire`);
+    const t = tous.find((x) => String(x.id) === tr.dataset.id);
+    if (!t) return notif("terme introuvable", true);
+    const lignes = (t.detail || []).map((d) => `
+      <div style="display:flex;gap:7px;align-items:center;margin:2px 0">
+        <span style="width:88px;font-size:11px">${echapper(d.nom)}</span>
+        <span style="flex:1;height:6px;border-radius:3px;background:var(--bordure)">
+          <span style="display:block;height:6px;width:${d.max ? (d.points / d.max) * 100 : 0}%;
+            border-radius:3px;background:var(--accent)"></span></span>
+        <span style="width:44px;text-align:right;font-size:11px">${d.points}/${d.max}</span>
+        <span class="faible" style="font-size:10px;width:200px">${echapper(d.quoi || "")}</span>
+      </div>`).join("");
+    const ligne = document.createElement("tr");
+    ligne.className = "note-ouverte detail-note";
+    ligne.innerHTML = `<td></td><td colspan="8" style="padding:7px 4px 9px">
+      <strong style="font-size:12px">${t.note}/100 — ${echapper(t.verdict || "")}</strong>
+      ${lignes}
+      ${t.valide ? '<p style="margin:6px 0 0;font-size:11px;color:var(--accent)">'
+        + "✓ Validé : ce terme ne sera ni purgé ni remplacé.</p>" : ""}
+    </td>`;
+    tr.after(ligne);
+    tr.classList.add("note-ouverte");
+  });
+
+  // --- purger les entrees auto, avec confirmation : c'est une suppression
+  v.querySelector("#purger-auto").addEventListener("click", async () => {
+    const r = await api(`/projets/${nom}/glossaire/purger-auto`,
+                       { method: "POST", body: "{}" });
+    if (!r.purges) return notif(`Rien à purger — ${nAutoSansOcc} terme(s) auto sans occurrence`);
+    notif(`${r.purges} terme(s) purgé(s) — ${r.apres} restent. `
+          + `Tes ${S.valides || 0} termes validés sont intacts.`);
+    vueGlossaire(v);
   });
 
   v.querySelector("#sv-gloss").addEventListener("click", async () => {

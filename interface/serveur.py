@@ -804,10 +804,12 @@ def api_glossaire(nom: str, orphelins: int = 0):
     ?orphelins=1 ne renvoie que les termes dont plus aucun PDF source n'existe.
     """
     import donnees
+    import qualite
 
     _p, ctx = _base(nom)
     with ctx as con:
-        return donnees.lister_termes(con, orphelins_seulement=bool(orphelins))
+        termes = donnees.lister_termes(con, orphelins_seulement=bool(orphelins))
+        return qualite.noter_liste(termes)
 
 
 @app.put("/api/projets/{nom}/glossaire")
@@ -830,6 +832,43 @@ def api_ecrire_glossaire(nom: str, payload: dict):
             donnees.upsert_terme(con, source, cible, t.get("tgt_lng") or "fr", "manuel")
             n += 1
         return {"ok": True, "enregistres": n}
+
+
+@app.post("/api/projets/{nom}/glossaire/{terme_id}/valider")
+def api_valider_terme(nom: str, terme_id: int, payload: dict):
+    """Coche ou decoche la validation d'un terme.
+
+    Un terme valide est la memoire du projet : la purge des entrees auto ne le
+    touche pas, et rien ne peut le remplacer sans ton accord.
+    """
+    import donnees
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        if not con.execute("SELECT 1 FROM glossaire WHERE id = ?",
+                           (terme_id,)).fetchone():
+            raise HTTPException(404, "terme introuvable")
+        donnees.valider_terme(con, terme_id, bool(payload.get("valide", True)))
+        return {"ok": True, "valide": bool(payload.get("valide", True))}
+
+
+@app.post("/api/projets/{nom}/glossaire/purger-auto")
+def api_purger_auto(nom: str):
+    """Efface les termes extraits automatiquement, garde ceux que tu as valides.
+
+    Ne touche qu'a ce qui est 'auto' ET sans occurrence : un terme absent du
+    texte ne peut rien faire de plus. Ni ce que tu as valide, ni ce que tu as
+    corrige a la main.
+    """
+    import donnees
+
+    _p, ctx = _base(nom)
+    with ctx as con:
+        avant = con.execute("SELECT COUNT(*) FROM glossaire").fetchone()[0]
+        r = donnees.purger_auto(con)
+        r["avant"] = avant
+        r["apres"] = con.execute("SELECT COUNT(*) FROM glossaire").fetchone()[0]
+        return r
 
 
 @app.delete("/api/projets/{nom}/glossaire/{terme_id}")
