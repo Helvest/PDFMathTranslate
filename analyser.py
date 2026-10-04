@@ -1020,6 +1020,26 @@ def step_glossary(
         print("  consignes lues")
 
     # --- ce qui est deja valide : jamais ecrase
+    # Les termes deja valides sont conserves tels quels — SAUF ceux qui ne
+    # peuvent pas servir : un mot ecrit lettre par lettre sur 23 lignes, ou une
+    # phrase complete. Ils ont ete extrait par une version anterieure, avant
+    # le nettoyage ; on les retire une fois, puis ils ne reviennent pas.
+    salies = {r["source"] for r in con.execute("SELECT * FROM glossaire")}
+    tout_pages = "\n".join(t for _, _, t in
+                            [(p.name, n, t) for p in pdfs
+                             for n, t in enumerate(pdf_pages(p), 1)])
+    a_vider = agents._nettoyer([{"src": s} for s in salies], tout_pages)
+    retenus = {t["src"] for t in a_vider}
+    a_purger = salies - retenus
+    for terme in a_purger:
+        con.execute("DELETE FROM glossaire WHERE source = ?", (terme,))
+        # les liens page_glossaire suivent : sans ca, un terme purge
+        # laisserait des lignes orphelines pointant sur rien
+        con.execute("DELETE FROM page_glossaire WHERE glossaire_id NOT IN "
+                    "(SELECT id FROM glossaire)")
+    if a_purger:
+        print(f"  {len(a_purger)} terme(s) pollue(s) purge(s) de la version anterieure")
+
     existing = {r["source"]: dict(r) for r in con.execute("SELECT * FROM glossaire")}
     if existing:
         print(f"  {len(existing)} termes deja presents (conserves tels quels)")
@@ -1032,6 +1052,11 @@ def step_glossary(
 
     lot = _resume_lot(ctxs)
     resumes = {c.get("fichier"): c for c in ctxs if c.get("fichier")}
+
+    # tout le texte du projet, pour verifier qu'un terme existe vraiment.
+    # On ne lit PAS les termes deja valides : ils sont dans `existing`, avec
+    # leur propre source, et n'ont pas besoin d'etre revérifiés.
+    tout_texte = "\n".join(t for _, _, t in pages)
 
     def _une_tache(t: dict) -> tuple[str, int, list[dict]]:
         ctx_pdf = resumes.get(t["pdf"], {})
@@ -1082,6 +1107,12 @@ def step_glossary(
     # Le prompt de fusion le demande, mais un modele peut l'ignorer. Mesure
     # sur un vrai glossaire : "Refrain" et "refrain" etaient deux entrees, et
     # le mot etait remplace deux fois dans le meme paragraphe.
+    avant = len(fusionnes)
+    # le nettoyage vient AVANT la casse : un terme ecrit lettre par lettre sur
+    # 23 lignes n'est pas une variante, c'est un artefact
+    fusionnes = agents._nettoyer(fusionnes, tout_texte)
+    if len(fusionnes) != avant:
+        print(f"    {avant - len(fusionnes)} terme(s) pollue(s) ecarte(s)")
     avant = len(fusionnes)
     fusionnes = agents._fusionner_casse(fusionnes)
     if len(fusionnes) != avant:

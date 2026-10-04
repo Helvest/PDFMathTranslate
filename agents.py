@@ -94,6 +94,10 @@ Regles de decision, dans l'ordre :
 2. Si les consignes de l'utilisateur l'imposent, applique-les.
 3. Sinon, si un intraduitible (nom propre, mot invente, faute voulue, objet
    nomme), src et tgt doivent etre IDENTIQUES. Ne le "corrige" surtout pas.
+   ATTENTION aux titres de section en MAJUSCULES (BARRACKS, ARMORY,
+   ECOLOGICAL SCIENCE FANTASY RPG, CULT OF THE LIZARD KING) : ce sont des
+   EN-TETES, pas des noms propres. Ils se TRADUISENT, meme tout en majuscules.
+   Ne les laisse jamais identiques a la source.
 4. Sinon, si les propositions divergent, choisis la traduction la plus
    coherente avec le ton du jeu, et signale-le dans la definition.
 5. Si plusieurs agents ont compris le terme differemment, garde la definition
@@ -122,6 +126,38 @@ Consignes de l'utilisateur :
 Reponds UNIQUEMENT par un tableau JSON :
 [{{"src": "terme", "tgt": "traduction", "definition": "definition", "source": "agent|fusion", "doute": "vide ou raison du doute"}}]
 """
+
+
+def _nettoyer(termes: list[dict], texte: str = "") -> list[dict]:
+    """Jette les termes qui ne peuvent pas servir.
+
+    Deux mesures reelles :
+      - un terme ecrit lettre par lettre sur plusieurs lignes (la mise en page
+        d'un PDF casse un mot verticalement) : "A\nN\nE\nW..." — introuvable
+        par babeldoc, donc inutile
+      - un terme de plus de 6 mots : c'est une phrase, pas un terme
+
+    On verifie aussi que le terme apparait REELLEMENT dans le texte. Un terme
+    que le modele a invente ne sert a rien et pollue le comptage.
+    """
+    texte_norm = re.sub(r"\s+", " ", texte or "").lower()
+
+    out: list[dict] = []
+    for t in termes:
+        src = (t.get("src") or "").strip()
+        if not src:
+            continue
+        if "\n" in src or "\r" in src:
+            continue                      # casse par la mise en page
+        if len(src.split()) > 6:
+            continue                      # c'est une phrase
+        if src.endswith((".", "!", "?", ":", ";")):
+            continue                      # fragment de phrase
+        # le terme doit exister : sinon c'est une invention du modele
+        if texte_norm and re.sub(r"\s+", " ", src).lower() not in texte_norm:
+            continue
+        out.append(t)
+    return out
 
 
 def _fusionner_casse(termes: list[dict]) -> list[dict]:
