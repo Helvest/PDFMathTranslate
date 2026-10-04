@@ -126,6 +126,9 @@ def lister_termes(con, orphelins_seulement: bool = False) -> list[dict]:
             "tgt_lng": r["tgt_lng"], "origine": r["origine"],
             "occurrences": r["occurrences"], "nb_pages": r["nb_pages"],
             "definition": r["definition"] or "",
+            "valide": bool(r["valide"]),
+            "nb_pdfs": r["nb_pdfs"],
+            "portee_totale": r["portee_totale"],
             "sources": sources,
             "orphelin": not sources,
         })
@@ -229,6 +232,36 @@ def purger_polices_orphelines(con) -> int:
 
 
 # ------------------------------------------------------------------ export
+
+
+def purger_auto(con) -> dict:
+    """Efface les termes extraits automatiquement, garde ceux que tu as valides.
+
+    Ce que tu valides est la memoire du projet : un terme valide n'est jamais
+    efface, meme si un agent le redonne plus tard. Un terme que tu as corrige a
+    la main aussi (origine 'manuel'), parce que c'est toi qui l'as change.
+
+    On ne purge que ce qui a des occurrences nulles sur tous les PDF — un terme
+    absent du texte ne peut rien faire de plus, il encombre seulement. La note
+    sert a trier AVANT de purger ; ici on purge l'evident.
+    """
+    a_purger = [r["source"] for r in con.execute(
+        "SELECT source FROM glossaire"
+        " WHERE valide = 0 AND origine = 'auto' AND occurrences = 0"
+        " ORDER BY source"
+    )]
+    for terme in a_purger:
+        con.execute("DELETE FROM glossaire WHERE source = ?", (terme,))
+    # les liens page_glossaire suivent, sinon on laisse des orphelins
+    con.execute("DELETE FROM page_glossaire WHERE glossaire_id NOT IN "
+                "(SELECT id FROM glossaire)")
+    return {"purges": len(a_purger), "termes": a_purger}
+
+
+def valider_terme(con, terme_id: int, valide: bool) -> None:
+    """Coche ou decoche la validation d'un terme."""
+    con.execute("UPDATE glossaire SET valide = ?, maj = datetime('now')"
+                " WHERE id = ?", (1 if valide else 0, terme_id))
 
 
 def exporter_glossaire_csv(con, chemin: Path) -> Path:

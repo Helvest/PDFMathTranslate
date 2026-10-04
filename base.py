@@ -88,6 +88,9 @@ CREATE TABLE IF NOT EXISTS glossaire (
     definition  TEXT NOT NULL DEFAULT '',
     occurrences INTEGER NOT NULL DEFAULT 0,
     nb_pages    INTEGER NOT NULL DEFAULT 0,
+    valide      INTEGER NOT NULL DEFAULT 0,
+    nb_pdfs     INTEGER NOT NULL DEFAULT 0,
+    portee_totale INTEGER,
     maj         TEXT
 );
 
@@ -121,6 +124,24 @@ CREATE TABLE IF NOT EXISTS police_polices (
 CREATE INDEX IF NOT EXISTS pp_police ON police_polices(police_id);
 CREATE INDEX IF NOT EXISTS pp_pdf ON police_polices(pdf_id);
 """
+
+
+# Colonnes ajoutees apres la premiere version. `CREATE TABLE IF NOT EXISTS` ne
+# touche pas une table deja creee : sans ca, une base existante n'aurait jamais
+# la colonne et l'ecriture echouerait sur une base qui a l'air correcte.
+MIGRATIONS = (
+    ("glossaire", "valide", "INTEGER NOT NULL DEFAULT 0"),
+    ("glossaire", "nb_pdfs", "INTEGER NOT NULL DEFAULT 0"),
+    ("glossaire", "portee_totale", "INTEGER"),
+)
+
+
+def _migrer(con: sqlite3.Connection) -> None:
+    """Ajoute les colonnes manquantes. Idempotent."""
+    for table, colonne, type_sql in MIGRATIONS:
+        existantes = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+        if existantes and colonne not in existantes:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {colonne} {type_sql}")
 
 
 def chemin_base(projet: Path) -> Path:
@@ -174,6 +195,7 @@ def connecter(projet: Path):
 
         if not _schema_present(con):
             con.executescript(SCHEMA)
+        _migrer(con)
 
         yield con
         con.commit()

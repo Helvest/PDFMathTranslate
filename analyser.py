@@ -1125,9 +1125,14 @@ def step_glossary(
         tgt_t = (terme.get("tgt") or "").strip()
         if not src_t or not tgt_t:
             continue
+        # Un terme deja en base ne devient PAS "manuel" pour autant : ca
+        # protegeait 33 termes a la premiere analyse, dont aucun n'avait ete
+        # vu par toi. Seul ton passage en manuel doit proteger un terme — donc
+        # on conserve l'origine existante, et on laisse `upsert_terme` la
+        # changer si la cible differe (c'est toi qui as corrige).
         gid = _donnees.upsert_terme(
             con, src_t, tgt_t, lang_out,
-            "manuel" if src_t in existing else "auto",
+            existing.get(src_t, {}).get("origine", "auto"),
         )
         if terme.get("definition"):
             con.execute("UPDATE glossaire SET definition = ? WHERE id = ?",
@@ -1139,7 +1144,7 @@ def step_glossary(
         nb += 1
 
     # le comptage d'occurrences, sur tous les PDF du projet
-    _compter_occurrences(con, pdfs)
+    _compter_occurrences(con)
     total = con.execute("SELECT COUNT(*) FROM glossaire").fetchone()[0]
     print(f"  {nb} terme(s) fusionne(s) -> {total} au total")
 
@@ -1158,22 +1163,54 @@ def _par_blots(items: list, n: int):
         yield items[i:i + n]
 
 
-def _compter_occurrences(con, pdfs: list[Path]) -> None:
-    """Recompte occurrences et pages de chaque terme, sur tous les PDF."""
+def _tous_pdfs_du_projet(con) -> list[Path]:
+    """Tous les PDF connus du projet, presents ou absents.
+
+    Le comptage doit porter sur le PROJET, pas sur la selection du jour : un
+    terme qui revient dans trois PDF du livre est bien plus important qu'un
+    terme a vingt occurrences dans un seul. Compter sur la selection faisait
+    chuter la note de portee a chaque analyse partielle — c'est-a-dire
+    exactement quand on ne regarde qu'un extrait.
+    """
+    dossier = base.projet()
+    if dossier is None:
+        return []
+    source = dossier / "source"
+    connus = {r["nom"] for r in con.execute("SELECT nom FROM pdf")}
+    presents = [p for p in sorted(source.glob("*.pdf")) if p.name in connus]
+    # un PDF absent du disque garde sa place : ses occurrences sont celles
+    # connues, pas zero
+    return presents
+
+
+def _compter_occurrences(con, pdfs: list[Path] | None = None) -> None:
+    """Recompte occurrences et pages de chaque terme, sur tous les PDF.
+
+    `pdfs` force une liste ; par defaut on prend tout le projet. Chaque terme
+    garde aussi le nombre de PDF ou il apparait, c'est ce que la note de
+    qualite utilise.
+    """
+    if pdfs is None:
+        pdfs = _tous_pdfs_du_projet(con)
     textes: dict[str, list[str]] = {}
     for pdf in pdfs:
         if pdf.name not in textes:
             textes[pdf.name] = pdf_pages(pdf)
 
+    nb_pdf_projet = len(textes)
     for r in con.execute("SELECT id, source FROM glossaire").fetchall():
         total = pages_vues = 0
+        vus = 0
         for pages in textes.values():
             n, np_ = compter_terme(r["source"], pages)
             total += n
             pages_vues += np_
+            if n:
+                vus += 1
         con.execute(
-            "UPDATE glossaire SET occurrences = ?, nb_pages = ? WHERE id = ?",
-            (total, pages_vues, r["id"]),
+            "UPDATE glossaire SET occurrences = ?, nb_pages = ?,"
+            " nb_pdfs = ?, portee_totale = ? WHERE id = ?",
+            (total, pages_vues, vus, nb_pdf_projet, r["id"]),
         )
 
 
